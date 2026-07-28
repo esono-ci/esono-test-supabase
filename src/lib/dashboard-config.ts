@@ -1,0 +1,175 @@
+import {
+  LayoutGrid, Globe, FileSpreadsheet, BarChart3,
+  Stethoscope, FileText, Target,
+  TrendingUp, Briefcase, Upload,
+  FileSearch, BookOpen, Users,
+} from 'lucide-react';
+import type { Database } from '@/integrations/supabase/types';
+
+export type ModuleCode = Database['public']['Enums']['module_code'];
+export type DeliverableType = Database['public']['Enums']['deliverable_type'];
+export type ModuleStatus = Database['public']['Enums']['module_status'];
+export type Enterprise = Database['public']['Tables']['enterprises']['Row'];
+export type Deliverable = Database['public']['Tables']['deliverables']['Row'];
+export type EnterpriseModule = Database['public']['Tables']['enterprise_modules']['Row'];
+export type CoachUpload = Database['public']['Tables']['coach_uploads']['Row'];
+
+export interface UploadedFile {
+  name: string;
+  size: number;
+}
+
+export const MODULE_CONFIG = [
+  { code: 'diagnostic' as ModuleCode, title: 'Bilan de progression', shortTitle: 'Bilan de progression', icon: Stethoscope, color: 'bg-orange-100 text-orange-600', step: 1 },
+  { code: 'bmc' as ModuleCode,        title: 'Business Model Canvas',    shortTitle: 'Business Model Canvas',    icon: LayoutGrid,  color: 'bg-emerald-100 text-emerald-600', step: 2 },
+  { code: 'sic' as ModuleCode,        title: 'Social Impact Canvas',     shortTitle: 'Social Impact Canvas',     icon: Globe,       color: 'bg-teal-100 text-teal-600',    step: 3 },
+  { code: 'plan_financier' as ModuleCode, title: 'Plan Financier', shortTitle: 'Plan Financier', icon: BarChart3, color: 'bg-purple-100 text-purple-600', step: 4 },
+  { code: 'business_plan' as ModuleCode, title: 'Business Plan',         shortTitle: 'Business Plan',            icon: FileText,    color: 'bg-indigo-100 text-indigo-600', step: 5 },
+  { code: 'odd' as ModuleCode,        title: 'ODD',                      shortTitle: 'ODD',                      icon: Target,      color: 'bg-red-100 text-red-600',      step: 6 },
+  { code: 'valuation' as ModuleCode,  title: 'Valorisation',             shortTitle: 'Valorisation',             icon: TrendingUp,  color: 'bg-violet-100 text-violet-700', step: 7 },
+  { code: 'onepager' as ModuleCode,   title: 'One-Pager Investisseur',   shortTitle: 'One-Pager',                icon: FileText,    color: 'bg-cyan-100 text-cyan-600',    step: 8 },
+  { code: 'investment_memo' as ModuleCode, title: "Mémo d'Investissement", shortTitle: 'Mémo Investisseur',      icon: Briefcase,   color: 'bg-slate-100 text-slate-700',  step: 9 },
+];
+
+export const MODULE_CONFIG_COACH = [
+  { code: 'bmc',           title: 'Business Model Canvas',       icon: LayoutGrid,      color: '#059669' },
+  { code: 'sic',           title: 'Social Impact Canvas',        icon: Globe,           color: '#7c3aed' },
+  { code: 'inputs',        title: 'Données Financières',         icon: FileSpreadsheet, color: '#d97706' },
+  { code: 'plan_financier', title: 'Plan Financier',             icon: BarChart3,       color: '#2563eb' },
+  { code: 'diagnostic',    title: 'Bilan de progression',        icon: Stethoscope,     color: '#1e3a5f' },
+  { code: 'business_plan', title: 'Business Plan',               icon: FileText,        color: '#4338ca' },
+  { code: 'odd',           title: 'Due Diligence ODD',           icon: Target,          color: '#0891b2' },
+  { code: 'valuation',     title: 'Valorisation',                icon: TrendingUp,      color: '#7c3aed' },
+  { code: 'onepager',      title: 'One-Pager Investisseur',      icon: FileText,        color: '#0891b2' },
+  { code: 'investment_memo', title: "Mémo d'Investissement",     icon: Briefcase,       color: '#475569' },
+];
+
+export const DELIVERABLE_CONFIG = [
+  { type: 'pre_screening',   label: 'Diagnostic initial',                         formats: ['html', 'json'], icon: '🔍' },
+  { type: 'bmc_analysis',    label: 'Business Model Canvas',                     formats: ['html', 'json'], icon: '📊' },
+  { type: 'sic_analysis',    label: 'Social Impact Canvas',                      formats: ['html', 'json'], icon: '🌍' },
+  { type: 'framework_data',  label: 'Plan Financier Intermédiaire',              formats: ['html', 'xlsx'], icon: '📈' },
+  { type: 'diagnostic_data', label: 'Bilan de progression',                      formats: ['html', 'json'], icon: '🩺' },
+  { type: 'plan_ovo',        label: 'Plan Financier Final',                      formats: ['html', 'xlsx'], icon: '📋' },
+  { type: 'plan_financier',  label: 'Plan Financier',                            formats: ['html', 'json', 'xlsx'], icon: '📊' },
+  { type: 'business_plan',   label: 'Business Plan',                             formats: ['html', 'json', 'docx'], icon: '📄' },
+  { type: 'odd_analysis',    label: 'ODD (17 Objectifs de Développement Durable)', formats: ['html', 'json', 'xlsx'], icon: '🌍' },
+  { type: 'valuation',       label: 'Valorisation',                              formats: ['html', 'json'], icon: '💰' },
+  { type: 'onepager',        label: 'One-Pager Investisseur',                    formats: ['html', 'json'], icon: '📃' },
+  { type: 'investment_memo', label: "Mémo d'Investissement",                     formats: ['html', 'json'], icon: '💼' },
+];
+
+export const PIPELINE = [
+  // Phase 1 — Triage & Extraction
+  { name: 'Diagnostic initial', fn: 'generate-pre-screening',  type: 'pre_screening' as DeliverableType, eta: '~2 min' },
+  { name: 'Inputs',           fn: 'generate-inputs',           type: 'inputs_data' as DeliverableType, eta: '~1 min' },
+  // Phase 2 — Analyse (BMC/SIC lisent inputs_data + pre_screening)
+  { name: 'BMC',              fn: 'generate-bmc',              type: 'bmc_analysis' as DeliverableType, eta: '~1 min' },
+  { name: 'SIC',              fn: 'generate-sic',              type: 'sic_analysis' as DeliverableType, eta: '~1 min' },
+  { name: 'Framework',        fn: 'generate-framework',        type: 'framework_data' as DeliverableType, eta: '~2 min' },
+  // Phase 3 — Plans & Stratégie
+  { name: 'Plan Financier',   fn: 'generate-plan-financier',   type: 'plan_financier' as DeliverableType, eta: '~1.5 min' },
+  { name: 'Business Plan',    fn: 'generate-business-plan',    type: 'business_plan' as DeliverableType, eta: '~2 min' },
+  { name: 'ODD',              fn: 'generate-odd',              type: 'odd_analysis' as DeliverableType, eta: '~2 min' },
+  { name: 'Diagnostic',       fn: 'generate-diagnostic',       type: 'diagnostic_data' as DeliverableType, eta: '~1 min' },
+  // Phase 4 — Investisseur
+  { name: 'Valuation',        fn: 'generate-valuation',        type: 'valuation' as DeliverableType, eta: '~1.5 min' },
+  { name: 'One-Pager',        fn: 'generate-onepager',         type: 'onepager' as DeliverableType, eta: '~30s' },
+  { name: 'Investment Memo',  fn: 'generate-investment-memo',  type: 'investment_memo' as DeliverableType, eta: '~4 min' },
+  // Phase 5 — Décision
+  { name: 'Décision programme', fn: 'generate-screening-report', type: 'screening_report' as DeliverableType },
+];
+
+/**
+ * Dépendances inter-modules : pour chaque deliverable, liste des deliverables upstream
+ * dont la mise à jour invalide ce deliverable. Utilisé par pipeline-runner pour cascader
+ * la fraîcheur (si inputs_data est régénéré, plan_financier est stale même si son propre
+ * updated_at est plus récent que les sources externes).
+ */
+export const PIPELINE_DEPENDENCIES: Record<string, DeliverableType[]> = {
+  pre_screening: [],
+  inputs_data: [],
+  bmc_analysis: ['inputs_data', 'pre_screening'],
+  sic_analysis: ['inputs_data', 'bmc_analysis'],
+  framework_data: ['inputs_data'],
+  plan_financier: ['inputs_data', 'framework_data', 'bmc_analysis'],
+  business_plan: ['inputs_data', 'bmc_analysis', 'sic_analysis', 'plan_financier'],
+  odd_analysis: ['inputs_data', 'sic_analysis'],
+  diagnostic_data: ['inputs_data', 'framework_data', 'plan_financier'],
+  valuation: ['inputs_data', 'plan_financier', 'framework_data'],
+  onepager: ['inputs_data', 'bmc_analysis', 'plan_financier', 'valuation'],
+  investment_memo: ['inputs_data', 'bmc_analysis', 'sic_analysis', 'plan_financier', 'valuation', 'framework_data'],
+  screening_report: ['inputs_data', 'plan_financier', 'business_plan', 'odd_analysis', 'diagnostic_data', 'valuation', 'investment_memo'],
+};
+
+export const MODULE_FN_MAP: Record<string, string> = {
+  bmc: 'generate-bmc',
+  sic: 'generate-sic',
+  inputs: 'generate-inputs',
+  framework: 'generate-framework',
+  diagnostic: 'generate-diagnostic',
+  plan_ovo: 'generate-plan-financier',
+  plan_financier: 'generate-plan-financier',
+  business_plan: 'generate-business-plan',
+  odd: 'generate-odd',
+  pre_screening: 'generate-pre-screening',
+  valuation: 'generate-valuation',
+  onepager: 'generate-onepager',
+  investment_memo: 'generate-investment-memo',
+  screening_report: 'generate-screening-report',
+};
+
+// ===== PHASE STRUCTURE =====
+
+export interface PhaseConfig {
+  id: string;
+  label: string;
+  shortLabel: string;
+  color: string;
+  modules: {
+    code: string;
+    label: string;
+    icon: any;
+    special?: 'upload' | 'pre_screening' | 'screening' | 'dataroom';
+  }[];
+}
+
+export const PHASES: PhaseConfig[] = [
+  {
+    id: 'phase_donnees',
+    label: 'Données',
+    shortLabel: 'Données',
+    color: 'violet',
+    modules: [
+      { code: 'upload', label: 'Upload documents', icon: Upload, special: 'upload' },
+      // Reconstruction masquée — pas essentiel pour les utilisateurs standards. Réactivable en décommentant.
+      // { code: 'reconstruction', label: 'Reconstruction', icon: RefreshCw, special: 'upload' },
+      { code: 'coach_info', label: 'Information du coach', icon: Users, special: 'upload' },
+      { code: 'sources', label: 'Sources & références', icon: BookOpen, special: 'upload' },
+    ],
+  },
+  {
+    id: 'phase_diagnostic',
+    label: 'Diagnostic',
+    shortLabel: 'Diagnostic',
+    color: 'violet',
+    modules: [
+      { code: 'pre_screening', label: 'Diagnostic', icon: FileSearch, special: 'pre_screening' },
+    ],
+  },
+  {
+    id: 'phase_livrables',
+    label: 'Livrables',
+    shortLabel: 'Livrables',
+    color: 'violet',
+    modules: [
+      { code: 'bmc', label: 'Business Model Canvas', icon: LayoutGrid },
+      { code: 'plan_financier', label: 'Plan Financier', icon: BarChart3 },
+      { code: 'business_plan', label: 'Business Plan', icon: FileText },
+      { code: 'odd', label: 'Impact ODD', icon: Target },
+      { code: 'valuation', label: 'Valorisation', icon: TrendingUp },
+      { code: 'onepager', label: 'One-Pager', icon: FileText },
+      { code: 'investment_memo', label: 'Mémo Investissement', icon: Briefcase },
+    ],
+  },
+];

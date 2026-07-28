@@ -1,0 +1,177 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  try {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) throw new Error("Authorization required");
+
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const adminClient = createClient(supabaseUrl, supabaseServiceKey);
+
+    const { data: { user } } = await userClient.auth.getUser();
+    if (!user) throw new Error("Not authenticated");
+
+    const { token } = await req.json();
+    if (!token) throw new Error("token required");
+
+    // Récupérer l'invitation
+    const { data: invitation } = await adminClient
+      .from("organization_invitations")
+      .select("*")
+      .eq("token", token)
+      .single();
+
+    if (!invitation) throw new Error("Invalid invitation");
+    if (invitation.accepted_at) throw new Error("Invitation already accepted");
+    if (invitation.revoked_at) throw new Error("Invitation revoked");
+    if (new Date(invitation.expires_at) < new Date()) throw new Error("Invitation expired");
+
+    // Vérifier que l'email correspond
+    if (user.email?.toLowerCase() !== invitation.email.toLowerCase()) {
+      return new Response(JSON.stringify({
+        error: "Email mismatch",
+        expected_email: invitation.email,
+        message: `Cette invitation est pour ${invitation.email}. Connectez-vous avec ce compte.`,
+      }), {
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Créer le membership
+    const { error: memberError } = await adminClient
+      .from("organization_members")
+      .upsert({
+        organization_id: invitation.organization_id,
+        user_id: user.id,
+        role: invitation.role,
+        invited_by: invitation.invited_by,
+        is_active: true,
+      }, { onConflict: "organization_id,user_id" });
+
+    if (memberError) throw memberError;
+
+    // Attribuer le rôle applicatif (user_roles) pour que le router puisse orienter vers le bon dashboard
+    const VALID_APP_ROLES = ['entrepreneur', 'coach', 'admin', 'super_admin'];
+    if (VALID_APP_ROLES.includes(invitation.role)) {
+      const { error: roleError } = await adminClient
+        .from("user_roles")
+        .upsert({ user_id: user.id, role: invitation.role }, { onConflict: "user_id,role" });
+      if (roleError) console.warn("[accept-invitation] user_roles upsert failed:", roleError.message);
+    }
+
+    // Un chef de programme (org role manager) a besoin de l'app role chef_programme
+    // pour que le routeur l'oriente vers /programmes.
+    if (invitation.role === 'manager') {
+      const { error: cpErr } = await adminClient
+        .from("user_roles")
+        .upsert({ user_id: user.id, role: 'chef_programme' }, { onConflict: "user_id,role" });
+      if (cpErr) console.warn("[accept-invitation] chef_programme app role upsert failed:", cpErr.message);
+    }
+
+    // Assignation des programmes choisis à l'invitation : l'invité devient leur chef.
+    if (Array.isArray(invitation.programme_ids) && invitation.programme_ids.length) {
+      const { error: assignErr } = await adminClient
+        .from("programmes")
+        .update({ chef_programme_id: user.id })
+        .in("id", invitation.programme_ids)
+        .eq("organization_id", invitation.organization_id);
+      if (assignErr) console.warn("[accept-invitation] assignation programmes échouée:", assignErr.message);
+    }
+
+    // Si l'invitation portait un enterprise_id : devenir propriétaire de ce dossier
+    let linked_enterprise_id: string | null = null;
+    if (invitation.enterprise_id) {
+      const { data: ent, error: entSelErr } = await adminClient
+        .from("enterprises")
+        .select("id, user_id, organization_id")
+        .eq("id", invitation.enterprise_id)
+        .single();
+      if (entSelErr) {
+        console.warn("[accept-invitation] enterprise lookup failed:", entSelErr.message);
+      } else if (ent && ent.organization_id === invitation.organization_id) {
+        const { error: entUpdErr } = await adminClient
+          .from("enterprises")
+          .update({ user_id: user.id, contact_email: user.email ?? null })
+          .eq("id", ent.id);
+        if (entUpdErr) {
+          console.warn("[accept-invitation] enterprise transfer failed:", entUpdErr.message);
+        } else {
+          linked_enterprise_id = ent.id;
+        }
+      }
+    }
+
+    // Matérialisation des pré-assignations coach → enterprise_coaches.
+    // Si le manager a pré-assigné ce coach (via enterprise_coach_invitations) avant qu'il
+    // n'accepte, on crée maintenant les rows enterprise_coaches correspondantes et on
+    // nettoie la table de pré-assignation.
+    if (invitation.role === 'coach') {
+      const { data: pending, error: pendingErr } = await adminClient
+        .from("enterprise_coach_invitations")
+        .select("id, enterprise_id, role, assigned_by")
+        .eq("invitation_id", invitation.id);
+      if (pendingErr) {
+        console.warn("[accept-invitation] pending coach lookup failed:", pendingErr.message);
+      } else if (pending && pending.length > 0) {
+        const rows = pending.map((p: any) => ({
+          enterprise_id: p.enterprise_id,
+          coach_id: user.id,
+          organization_id: invitation.organization_id,
+          role: p.role || 'principal',
+          assigned_by: p.assigned_by ?? invitation.invited_by ?? null,
+          is_active: true,
+        }));
+        const { error: ecErr } = await adminClient
+          .from("enterprise_coaches")
+          .upsert(rows, { onConflict: "enterprise_id,coach_id" });
+        if (ecErr) {
+          console.warn("[accept-invitation] coach pre-assign materialize failed:", ecErr.message);
+        } else {
+          // Nettoyage des pré-assignations matérialisées
+          await adminClient
+            .from("enterprise_coach_invitations")
+            .delete()
+            .eq("invitation_id", invitation.id);
+          console.log(`[accept-invitation] materialized ${rows.length} pre-assigned enterprise(s) for coach ${user.id}`);
+        }
+      }
+    }
+
+    // Marquer l'invitation comme acceptée
+    await adminClient
+      .from("organization_invitations")
+      .update({ accepted_at: new Date().toISOString() })
+      .eq("id", invitation.id);
+
+    console.log(`[accept-invitation] User ${user.id} joined org ${invitation.organization_id} as ${invitation.role}${linked_enterprise_id ? ` (linked to enterprise ${linked_enterprise_id})` : ''}`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      organization_id: invitation.organization_id,
+      role: invitation.role,
+      enterprise_id: linked_enterprise_id,
+    }), {
+      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+
+  } catch (err: any) {
+    console.error("[accept-invitation] ERROR:", err);
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+});

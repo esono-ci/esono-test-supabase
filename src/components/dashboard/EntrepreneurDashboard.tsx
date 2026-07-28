@@ -1,0 +1,2042 @@
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/hooks/useAuth';
+import { useOrganization } from '@/contexts/OrganizationContext';
+import { supabase } from '@/integrations/supabase/client';
+import { Card } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { toast } from 'sonner';
+import {
+  Plus, Building2, Sparkles, Download,
+  LogOut, Clock, CheckCircle2, Loader2,
+  FolderPlus, Pencil, Trash2, ArrowLeft,
+  FileText, BarChart3, Stethoscope, LayoutGrid, Globe, FileSpreadsheet, Target, Search, FileSearch,
+  Upload, X
+} from 'lucide-react';
+import BmcViewer from './BmcViewer';
+import SicViewer from './SicViewer';
+import DeliverableViewer from './DeliverableViewer';
+import BusinessPlanPreview from './BusinessPlanPreview';
+import PlanFinancierViewer from './PlanFinancierViewer';
+import { downloadPlanFinancierExcel } from '@/lib/planFinancierExcel';
+
+import ReconstructionUploader from './ReconstructionUploader';
+import ScreeningReportViewer from './ScreeningReportViewer';
+import PreScreeningViewer from './PreScreeningViewer';
+import ValuationViewer from './ValuationViewer';
+import OnePagerViewer from './OnePagerViewer';
+import InvestmentMemoViewer from './InvestmentMemoViewer';
+import DataRoomManager from './DataRoomManager';
+import SourcesViewer from './SourcesViewer';
+import CoachingTab from './CoachingTab';
+import ValidationBanner from './ValidationBanner';
+import InputsDiffBanner from './InputsDiffBanner';
+import VersionHistory from './VersionHistory';
+import TranslateButton from './TranslateButton';
+import DashboardSidebar from './DashboardSidebar';
+import DashboardOverview from './DashboardOverview';
+import EnterpriseCoachesManager from './EnterpriseCoachesManager';
+import CoherenceBadge from './CoherenceBadge';
+import { generateMemoHtml } from '@/lib/memo-html-generator';
+import {
+  MODULE_CONFIG, PIPELINE, MODULE_FN_MAP,
+  type Enterprise, type Deliverable, type EnterpriseModule, type UploadedFile,
+} from '@/lib/dashboard-config';
+import { getValidAccessToken } from '@/lib/getValidAccessToken';
+import { exportToPdf } from '@/lib/export-pdf';
+import { runPipelineFromClient, getPipelineState, type PipelineState } from '@/lib/pipeline-runner';
+
+interface EntrepreneurDashboardProps {
+  enterpriseId?: string;
+  showBackButton?: boolean;
+  onBack?: () => void;
+  coachMode?: boolean;
+  readOnly?: boolean;
+  onGeneratingChange?: (generating: boolean) => void;
+}
+
+export default function EntrepreneurDashboard({
+  enterpriseId,
+  showBackButton = false,
+  onBack,
+  coachMode = false,
+  readOnly = false,
+  onGeneratingChange,
+}: EntrepreneurDashboardProps = {}) {
+  const { user, profile, session: authSession, signOut } = useAuth();
+  const { currentOrg, memberships, isSuperAdmin } = useOrganization();
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [enterprise, setEnterprise] = useState<Enterprise | null>(null);
+  const viewerContainerRef = useRef<HTMLDivElement | null>(null);
+  const [modules, setModules] = useState<EnterpriseModule[]>([]);
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [_scoreHistory, setScoreHistory] = useState<Record<string, unknown>[]>([]);
+  const [_showScoreChart] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newSector, setNewSector] = useState('');
+  const SUPPORTED_COUNTRIES = ["Afrique du Sud", "Bénin", "Burkina Faso", "Cameroun", "Congo", "Côte d'Ivoire", "Éthiopie", "Gabon", "Ghana", "Guinée", "Guinée-Bissau", "Kenya", "Madagascar", "Mali", "Maroc", "Niger", "Nigeria", "RDC", "Rwanda", "Sénégal", "Tanzanie", "Togo", "Tunisie"].sort((a, b) => a.localeCompare(b, 'fr'));
+  const [newCountry, setNewCountry] = useState("");
+  const [newCity, setNewCity] = useState('');
+  const [newLegalForm, setNewLegalForm] = useState('');
+  const [newDescription, setNewDescription] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generatingModule, setGeneratingModule] = useState<string | null>(null);
+  const [generatingOvoPlan, setGeneratingOvoPlan] = useState(false);
+  const [_generatingScreening, setGeneratingScreening] = useState(false);
+  const [ovoDownloadUrl, setOvoDownloadUrl] = useState<string | null>(null);
+  const [regeneratingExcel, setRegeneratingExcel] = useState(false);
+  const [regeneratingOddExcel, setRegeneratingOddExcel] = useState(false);
+  const [selectedModule, setSelectedModule] = useState<string>('overview');
+  const [showEdit, setShowEdit] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editSector, setEditSector] = useState('');
+  const [editCountry, setEditCountry] = useState('');
+  const [editCity, setEditCity] = useState('');
+  const [editLegalForm, setEditLegalForm] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [extractedInfo, setExtractedInfo] = useState<{ name: string | null; country: string | null; sector: string | null } | null>(null);
+  const [showExtractDialog, setShowExtractDialog] = useState(false);
+  const [_extracting, setExtracting] = useState(false);
+  const [_pipelineState, setPipelineState] = useState<PipelineState>('generate');
+  const docInputRef = useRef<HTMLInputElement>(null);
+  const finInputRef = useRef<HTMLInputElement>(null);
+  const extraInputRef = useRef<HTMLInputElement>(null);
+
+  // Warn if coach tries to close browser during generation
+  useEffect(() => {
+    if (!generating) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'Une génération est en cours. Si vous quittez, elle sera interrompue.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [generating]);
+
+  // Notify parent of generating state changes
+  useEffect(() => {
+    onGeneratingChange?.(generating);
+  }, [generating, onGeneratingChange]);
+
+  const fetchData = useCallback(async () => {
+    if (!user) return;
+    let ent: Enterprise | null = null;
+
+    if (enterpriseId) {
+      // Coach mode: load specific enterprise
+      const { data } = await supabase
+        .from('enterprises').select('*').eq('id', enterpriseId).maybeSingle();
+      ent = data;
+
+      // Retry once if RLS blocked (token might be refreshing)
+      if (!ent) {
+        await new Promise(r => setTimeout(r, 1000));
+        const { data: retry } = await supabase
+          .from('enterprises').select('*').eq('id', enterpriseId).maybeSingle();
+        ent = retry;
+      }
+    } else {
+      // Entrepreneur mode: load own enterprise (take the most recent if multiple)
+      const { data } = await supabase
+        .from('enterprises').select('*').eq('user_id', user.id)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle();
+      ent = data;
+    }
+
+    if (ent) {
+      setEnterprise(ent);
+      const [modsRes, delivRes, filesRes, histRes] = await Promise.all([
+        supabase.from('enterprise_modules').select('*').eq('enterprise_id', ent.id),
+        supabase.from('deliverables').select('*').eq('enterprise_id', ent.id),
+        supabase.storage.from('documents').list(ent.id),
+        supabase.from('score_history').select('*').eq('enterprise_id', ent.id).order('created_at', { ascending: true }),
+      ]);
+      setModules(modsRes.data || []);
+      setDeliverables(delivRes.data || []);
+      setScoreHistory(histRes.data || []);
+      setUploadedFiles((filesRes.data || []).map((f) => ({ name: f.name, size: (f.metadata as { size?: number } | null)?.size || 0 })));
+    }
+    setInitialLoading(false);
+  }, [user, enterpriseId]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // ─── Realtime subscriptions for deliverables & modules ─────────────────────
+  useEffect(() => {
+    if (!enterprise) return;
+    const entId = enterprise.id;
+
+    const delivChannel = supabase
+      .channel(`deliverables-${entId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'deliverables',
+          filter: `enterprise_id=eq.${entId}`,
+        },
+        (payload) => {
+          console.log('[realtime] deliverable updated:', (payload.new as any)?.type);
+          supabase
+            .from('deliverables')
+            .select('*')
+            .eq('enterprise_id', entId)
+            .then(({ data }) => {
+              if (data) setDeliverables(data);
+            });
+        }
+      )
+      .subscribe();
+
+    const modulesChannel = supabase
+      .channel(`modules-${entId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'enterprise_modules',
+          filter: `enterprise_id=eq.${entId}`,
+        },
+        (payload) => {
+          console.log('[realtime] module updated:', (payload.new as any)?.module, (payload.new as any)?.status);
+          supabase
+            .from('enterprise_modules')
+            .select('*')
+            .eq('enterprise_id', entId)
+            .then(({ data }) => {
+              if (data) setModules(data);
+            });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(delivChannel);
+      supabase.removeChannel(modulesChannel);
+    };
+  }, [enterprise?.id]);
+
+  // Compute pipeline state whenever enterprise/deliverables change
+  useEffect(() => {
+    if (!enterprise) return;
+    getPipelineState(enterprise.id).then(setPipelineState);
+  }, [enterprise?.id, enterprise?.updated_at, deliverables.length]);
+
+  // Ensure templates are uploaded to storage buckets (best-effort, silent)
+  useEffect(() => {
+    if (!user) return;
+    const ensureTemplates = async () => {
+      try {
+        const token = await getValidAccessToken(authSession, navigate);
+        await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/upload-template`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({}),
+        });
+      } catch (_) { /* silent */ }
+    };
+    ensureTemplates();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Auto-resume polling if OVO generation is stuck in "processing" on page load
+  useEffect(() => {
+    if (!enterprise || generatingOvoPlan) return;
+    const ovoDeliv = deliverables.find((d) => d.type === 'plan_ovo_excel');
+    const meta = ovoDeliv?.data as Record<string, unknown> | undefined;
+    if (meta?.status === 'processing' && meta?.request_id && meta?.started_at) {
+      const age = Date.now() - new Date(meta.started_at as string).getTime();
+      if (age < 10 * 60 * 1000) { // less than 10 min old
+        setGeneratingOvoPlan(true);
+        toast.info('Génération OVO en cours, reprise du suivi...');
+        pollForOvoCompletion(enterprise.id, meta.request_id as string, meta.started_at as string)
+          .then((polled) => {
+            if (polled) {
+              setOvoDownloadUrl(polled.url);
+              toast.success('Plan Financier OVO généré avec succès !');
+            }
+            fetchData();
+          })
+          .catch((err) => {
+            toast.error(err.message || 'La génération a échoué');
+          })
+          .finally(() => setGeneratingOvoPlan(false));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enterprise?.id, deliverables.length]);
+
+  const extractEnterpriseInfo = async (enterpriseId: string) => {
+    try {
+      setExtracting(true);
+      const token = await getValidAccessToken(authSession, navigate);
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-enterprise-info`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ enterprise_id: enterpriseId }),
+        }
+      );
+      if (!response.ok) return;
+      const info = await response.json();
+      if (info.name || info.country || info.sector) {
+        // Check if info differs from current enterprise
+        const differs = (info.name && info.name !== enterprise?.name) ||
+          (info.country && info.country !== enterprise?.country) ||
+          (info.sector && info.sector !== enterprise?.sector);
+        if (differs) {
+          setExtractedInfo(info);
+          setShowExtractDialog(true);
+        }
+      }
+    } catch {
+      // Extraction is best-effort and silent
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleConfirmExtraction = async () => {
+    if (!enterprise || !extractedInfo) return;
+    setSaving(true);
+    try {
+      const updates: Partial<Enterprise> = {};
+      if (extractedInfo.name) updates.name = extractedInfo.name;
+      if (extractedInfo.country) updates.country = extractedInfo.country;
+      if (extractedInfo.sector) updates.sector = extractedInfo.sector;
+      const { error } = await supabase.from('enterprises').update(updates).eq('id', enterprise.id);
+      if (error) throw error;
+      toast.success('Informations mises à jour !');
+      setShowExtractDialog(false);
+      setExtractedInfo(null);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, category: string) => {
+    const files = e.target.files;
+    if (!enterprise) return;
+    setUploading(category);
+    try {
+      // Ensure valid auth session for storage uploads
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      if (!currentSession) {
+        const { data: { session: refreshed } } = await supabase.auth.refreshSession();
+        if (!refreshed) {
+          toast.error('Session expirée — veuillez vous reconnecter');
+          navigate('/login');
+          return;
+        }
+      }
+
+      const fileList = Array.from(files || []);
+
+      // 1. Upload to Storage
+      for (const file of fileList) {
+        const filePath = `${enterprise.id}/${file.name}`;
+        const { error } = await supabase.storage.from('documents').upload(filePath, file, { upsert: true });
+        if (error) throw error;
+      }
+      toast.success(`${fileList.length} fichier(s) uploadé(s)`);
+
+      // 2. Parse via Railway (extract text + tables) — runs in background
+      toast.info('Extraction du contenu des documents...');
+      try {
+        const parsedDocs: { fileName: string; content: string; category: string; quality: string }[] = [];
+        for (const file of fileList) {
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('endpoint', '/parse');
+          const { data: { session: parseSession } } = await supabase.auth.getSession();
+          const parseRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/proxy-parser`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${parseSession?.access_token || ''}` },
+            body: formData,
+          });
+          if (parseRes.ok) {
+            const parsed = await parseRes.json();
+            if (parsed.content && parsed.content.length > 10) {
+              parsedDocs.push({
+                fileName: file.name,
+                content: parsed.content,
+                category: parsed.category || 'autre',
+                quality: parsed.quality || 'unknown',
+              });
+            }
+          }
+        }
+
+        // 3. Merge with existing document_content and save
+        if (parsedDocs.length > 0) {
+          const existingContent = enterprise.document_content || '';
+          const newContent = parsedDocs.map(d =>
+            `\n══════ ${d.fileName} (${d.category}) ══════\n${d.content}`
+          ).join('\n');
+          const merged = existingContent + newContent;
+
+          // Update enterprise with parsed content + bump data_changed_at
+          await supabase.from('enterprises').update({
+            document_content: merged.slice(0, 300000),
+            document_parsing_report: JSON.stringify({
+              parsed_at: new Date().toISOString(),
+              new_files: parsedDocs.map(d => ({ name: d.fileName, category: d.category, quality: d.quality })),
+            }),
+            data_changed_at: new Date().toISOString(),
+          }).eq('id', enterprise.id);
+
+          toast.success(`${parsedDocs.length} document(s) analysé(s) — contenu extrait`);
+        }
+      } catch (parseErr) {
+        console.warn('Document parsing non-blocking error:', parseErr);
+        // Parsing failure is non-blocking — files are already uploaded
+      }
+
+      await fetchData();
+      // Trigger enterprise info extraction in background
+      const hasDeliverables = deliverables.length > 0;
+      if (!hasDeliverables) {
+        extractEnterpriseInfo(enterprise.id);
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Erreur d'upload");
+    } finally {
+      setUploading(null);
+      if (docInputRef.current) docInputRef.current.value = '';
+      if (finInputRef.current) finInputRef.current.value = '';
+      if (extraInputRef.current) extraInputRef.current.value = '';
+    }
+  };
+
+  const handleDeleteFile = async (fileName: string) => {
+    if (!enterprise) return;
+    if (!confirm(`Supprimer "${fileName}" ?`)) return;
+    try {
+      const { error } = await supabase.storage.from('documents').remove([`${enterprise.id}/${fileName}`]);
+      if (error) throw error;
+      toast.success('Fichier supprimé');
+      await fetchData();
+    } catch (err: any) {
+      toast.error(err.message || 'Erreur de suppression');
+    }
+  };
+
+  const [generationProgress, setGenerationProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleStopGeneration = useCallback(() => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setGenerating(false);
+    setGenerationProgress(null);
+    toast.info('Génération interrompue. Les livrables déjà générés sont conservés.');
+  }, []);
+
+  const handleGenerate = async (force = false) => {
+    if (!enterprise) return;
+
+    if (!enterprise.country) {
+      toast.error('Veuillez renseigner le pays de l\'entreprise avant de lancer la génération.');
+      return;
+    }
+
+    // M5: Warn if no documents uploaded (generation will use only form inputs — less accurate)
+    if (uploadedFiles.length === 0) {
+      toast('Aucun document uploadé — la génération utilisera uniquement les données saisies. Pour des résultats plus précis, uploadez vos documents financiers.', { icon: '📄', duration: 5000 });
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setGenerating(true);
+    setGenerationProgress({ current: 0, total: PIPELINE.length, name: 'Lancement…' });
+
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+
+      const pipelineResult = await runPipelineFromClient(enterprise.id, token, {
+        force,
+        signal: controller.signal,
+        onProgress: setGenerationProgress,
+        skipDiagnostic: true, // Diagnostic has its own button, independent from pipeline
+      });
+
+      if (pipelineResult.creditError && pipelineResult.completedCount === 0) {
+        toast.error("Crédits IA insuffisants.");
+      } else if (pipelineResult.creditError) {
+        toast.warning("Certains modules n'ont pas pu être générés : crédits IA insuffisants.");
+      }
+
+      const failedSteps = pipelineResult.results.filter(r => !r.success && !r.skipped);
+      if (failedSteps.length > 0 && !pipelineResult.creditError) {
+        toast.warning(`${failedSteps.length} module(s) en erreur : ${failedSteps.map(s => s.step).join(', ')}`);
+      }
+
+      if (pipelineResult.executedCount > 0) {
+        const skippedMsg = pipelineResult.skippedCount > 0 ? `, ${pipelineResult.skippedCount} déjà à jour` : '';
+        toast.success(`${pipelineResult.executedCount} livrable(s) recalculé(s)${skippedMsg}`);
+      } else if (pipelineResult.skippedCount > 0 && failedSteps.length === 0) {
+        toast.info(`Tous les livrables sont déjà à jour (${pipelineResult.skippedCount} modules). Utilisez "Régénération complète" pour forcer le recalcul.`);
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError' && !controller.signal.aborted) {
+        toast.error(err.message || 'Erreur de génération');
+      }
+    } finally {
+      abortControllerRef.current = null;
+      setGenerating(false);
+      setGenerationProgress(null);
+      // Single fetchData at the end for non-realtime data (scores, uploads)
+      await fetchData();
+    }
+  };
+
+  const handleGenerateModule = async (moduleCode: string) => {
+    if (!enterprise) return;
+    if (!enterprise.country) {
+      toast.error('Veuillez renseigner le pays de l\'entreprise avant de lancer la génération.');
+      return;
+    }
+    setGeneratingModule(moduleCode);
+    // Active la barre de progression globale + bouton Arrêter (mêmes états que le pipeline)
+    setGenerating(true);
+    setGenerationProgress({ current: 0, total: 1, name: 'Lancement…' });
+
+    const MODULE_TYPE_MAP: Record<string, string> = {
+      pre_screening: 'pre_screening', bmc: 'bmc_analysis', sic: 'sic_analysis',
+      inputs: 'inputs_data', framework: 'framework_data', diagnostic: 'diagnostic_data',
+      plan_financier: 'plan_financier', plan_ovo: 'plan_ovo', business_plan: 'business_plan',
+      odd: 'odd_analysis', valuation: 'valuation', onepager: 'onepager',
+      investment_memo: 'investment_memo', screening_report: 'screening_report',
+    };
+
+    const MODULE_LABELS: Record<string, string> = {
+      pre_screening: 'Diagnostic initial', bmc: 'Business Model Canvas', sic: 'Stratégie & innovation',
+      inputs: 'Inputs financiers', framework: 'Framework', diagnostic: 'Diagnostic',
+      plan_financier: 'Plan Financier', business_plan: 'Business Plan', odd: 'Impact ODD',
+      valuation: 'Valorisation', onepager: 'One-Pager', investment_memo: 'Memo Investissement',
+      screening_report: 'Rapport de screening',
+    };
+    const moduleLabel = MODULE_LABELS[moduleCode] || moduleCode;
+
+    const pollDeliverableReady = async (entId: string, delivType: string, maxPolls = 72): Promise<boolean> => {
+      // Realtime listener pour détection instantanée + polling fallback
+      let settled = false;
+      let realtimeSuccess = false;
+      const channel = supabase
+        .channel(`module-wait-${delivType}-${Date.now()}`)
+        .on('postgres_changes', {
+          event: '*', schema: 'public', table: 'deliverables',
+          filter: `enterprise_id=eq.${entId}`,
+        }, (payload) => {
+          const newType = (payload.new as any)?.type;
+          const newData = (payload.new as any)?.data;
+          if (newType !== delivType || !newData || settled) return;
+          if (newData.status === 'error' || newData._error) return; // laisse le poll throw
+          if (newData.status !== 'processing' && !newData._processing && Object.keys(newData).length > 10) {
+            realtimeSuccess = true;
+            settled = true;
+          }
+        }).subscribe();
+
+      try {
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          if (realtimeSuccess) return true;
+          // Mise à jour de la barre (% basé sur le temps écoulé, plafonné à 95%)
+          setGenerationProgress({
+            current: 0, total: 1,
+            name: `${moduleLabel}… (${Math.min(95, (i + 1) * 8)}%)`,
+          });
+          const { data: deliv } = await supabase
+            .from('deliverables')
+            .select('data, version, updated_at')
+            .eq('enterprise_id', entId)
+            .eq('type', delivType as any)
+            .single();
+          if (deliv?.data) {
+            const delivData = deliv.data as Record<string, any>;
+            if (delivData.status === 'error' || delivData._error) {
+              throw new Error(delivData.error || delivData._error || 'Erreur de génération');
+            }
+            // Fix BUG #4 : ignorer les rows avec _processing: true (état intermédiaire)
+            if (delivData.status !== 'processing' && !delivData._processing && Object.keys(delivData).length > 10) {
+              return true;
+            }
+          }
+        }
+        return false;
+      } finally {
+        supabase.removeChannel(channel);
+      }
+    };
+
+    const runSingleAttempt = async (functionName: string, token: string, entId: string, timeoutMs: number) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${functionName}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ enterprise_id: entId }),
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeoutId);
+
+      // Handle async 202 responses
+      if (response.status === 202) {
+        const body = await response.json();
+        return { ...body, _async: true };
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        let errMsg = 'Erreur';
+        try { const errJson = JSON.parse(errText); errMsg = errJson.error || errMsg; } catch {}
+        throw new Error(errMsg);
+      }
+      const body = await response.json();
+      if (body.accepted) return { ...body, _async: true };
+      return body;
+    };
+
+    // Poll enterprise_modules for memo checkpoint
+    const pollMemoCheckpoint = async (entId: string, maxWaitMs = 120000): Promise<string> => {
+      const interval = 5000;
+      const maxAttempts = Math.ceil(maxWaitMs / interval);
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, interval));
+        const { data } = await supabase
+          .from('enterprise_modules')
+          .select('data, status, progress')
+          .eq('enterprise_id', entId)
+          .eq('module', 'investment_memo')
+          .single();
+        const phase = (data?.data as any)?.phase;
+        if (phase === 'part1_completed') return 'checkpoint_ready';
+        if (phase === 'completed') return 'fully_done';
+        if (phase === 'failed') return 'failed';
+      }
+      return 'timeout';
+    };
+
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+      const functionName = MODULE_FN_MAP[moduleCode] || `generate-${moduleCode}`;
+
+      // Timeouts: 6 min for investment_memo, 5 min for business_plan/plan_financier, 2 min default
+      const timeoutMs = moduleCode === 'investment_memo' ? 360000
+        : (moduleCode === 'business_plan' || moduleCode === 'plan_financier') ? 300000
+        : 120000;
+
+      let result: any;
+      try {
+        result = await runSingleAttempt(functionName, token, enterprise.id, timeoutMs);
+      } catch (fetchErr: any) {
+        // For investment_memo, if network fails (Load failed / AbortError), poll for checkpoint
+        if (moduleCode === 'investment_memo' && (fetchErr.name === 'AbortError' || fetchErr.message?.includes('Load failed') || fetchErr.message?.includes('Failed to fetch'))) {
+          toast.info('Connexion interrompue — vérification du traitement en cours…');
+          const pollResult = await pollMemoCheckpoint(enterprise.id, 120000);
+          if (pollResult === 'checkpoint_ready') {
+            toast.info('Passe 1 terminée ! Lancement de la finalisation…');
+            const freshToken = await getValidAccessToken(authSession, navigate);
+            result = await runSingleAttempt(functionName, freshToken, enterprise.id, timeoutMs);
+          } else if (pollResult === 'fully_done') {
+            toast.success('Mémo d\'investissement déjà finalisé !');
+            setSelectedModule(moduleCode);
+            await fetchData();
+            return;
+          } else {
+            throw new Error('La génération du mémo a échoué. Réessayez.');
+          }
+        } else {
+          throw fetchErr;
+        }
+      }
+
+      // Investment memo 2-pass: if pass 1 returned processing (not async 202), auto-chain pass 2
+      if (result.processing === true && !result._async && moduleCode === 'investment_memo') {
+        toast.info('Mémo d\'investissement — passe 1 terminée, finalisation en cours…');
+        const freshToken = await getValidAccessToken(authSession, navigate);
+        result = await runSingleAttempt(functionName, freshToken, enterprise.id, timeoutMs);
+      }
+
+      // Handle async 202 responses — poll until deliverable is ready
+      if (result._async) {
+        const delivType = MODULE_TYPE_MAP[moduleCode] || moduleCode;
+        toast.info(`${moduleCode.toUpperCase()} en cours de génération…`, { description: 'Cela peut prendre 1-4 minutes.' });
+        const completed = await pollDeliverableReady(enterprise.id, delivType);
+        if (completed) {
+          toast.success(`${moduleCode.toUpperCase()} généré avec succès ✅`);
+        } else {
+          toast.warning(`${moduleCode.toUpperCase()} prend plus de temps que prévu. Rafraîchissez dans quelques instants.`);
+        }
+      } else {
+        toast.success(`${moduleCode.toUpperCase()} généré ! Score: ${result.score ?? 0}/100`);
+      }
+      setSelectedModule(moduleCode);
+      await fetchData();
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        toast.error('La génération a pris trop de temps. Réessayez.');
+      } else {
+        toast.error(err.message || 'Erreur de génération');
+      }
+    } finally {
+      setGeneratingModule(null);
+      setGenerating(false);
+      setGenerationProgress(null);
+    }
+  };
+
+  const createEnterprise = async () => {
+    if (!user || !newName.trim()) return;
+    if (!currentOrg?.id) {
+      toast.error('Aucune organisation active.');
+      return;
+    }
+    setCreating(true);
+    try {
+      const { data, error } = await supabase
+        .from('enterprises')
+        .insert({
+          user_id: user.id, name: newName.trim(), sector: newSector.trim() || null,
+          country: newCountry.trim() || null, city: newCity.trim() || null,
+          legal_form: newLegalForm.trim() || null, description: newDescription.trim() || null,
+          contact_email: profile?.email || user?.email || null,
+          contact_name: profile?.full_name || null,
+          organization_id: currentOrg.id,
+        } as any)
+        .select().single();
+      if (error) throw error;
+      const moduleInserts = MODULE_CONFIG.map(m => ({
+        enterprise_id: data.id,
+        module: m.code,
+        organization_id: currentOrg.id,
+      }));
+      await supabase.from('enterprise_modules').insert(moduleInserts as any);
+      toast.success('Entreprise créée !');
+      setShowCreate(false);
+      setNewName('');
+      fetchData();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setCreating(false);
+    }
+  };
+  const openEditDialog = () => {
+    if (!enterprise) return;
+    setEditName(enterprise.name || '');
+    setEditSector(enterprise.sector || '');
+    setEditCountry(enterprise.country || '');
+    setEditCity(enterprise.city || '');
+    setEditLegalForm(enterprise.legal_form || '');
+    setEditDescription(enterprise.description || '');
+    setShowEdit(true);
+  };
+
+  const saveEnterprise = async () => {
+    if (!enterprise || !editName.trim()) return;
+    setSaving(true);
+    try {
+      // Detect if pipeline-impactful fields changed
+      const dataImpactfulChanged =
+        (editSector.trim() || null) !== (enterprise.sector || null) ||
+        (editCountry.trim() || null) !== (enterprise.country || null) ||
+        (editDescription.trim() || null) !== (enterprise.description || null);
+
+      const updatePayload: any = {
+        name: editName.trim(),
+        sector: editSector.trim() || null,
+        country: editCountry.trim() || null,
+        city: editCity.trim() || null,
+        legal_form: editLegalForm.trim() || null,
+        description: editDescription.trim() || null,
+      };
+
+      // Only bump data_changed_at when data-impactful fields changed
+      if (dataImpactfulChanged) {
+        updatePayload.data_changed_at = new Date().toISOString();
+      }
+
+      const { error } = await supabase.from('enterprises')
+        .update(updatePayload)
+        .eq('id', enterprise.id);
+      if (error) throw error;
+
+      const msg = dataImpactfulChanged
+        ? 'Entreprise mise à jour ! Les livrables seront recalculés.'
+        : 'Entreprise mise à jour (pas de recalcul nécessaire).';
+      toast.success(msg);
+      setShowEdit(false);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const getDeliverable = (type: string) => {
+    const matches = deliverables.filter((d: any) => d.type === type);
+    if (matches.length <= 1) return matches[0] || undefined;
+    return matches.sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0];
+  };
+
+  void modules.filter((m) => m.status === 'completed').length;
+  const scoredDeliverables = deliverables.filter((d) => d.score != null);
+  const globalScore = scoredDeliverables.length > 0
+    ? Math.round(scoredDeliverables.reduce((sum, d) => sum + (d.score || 0), 0) / scoredDeliverables.length)
+    : 0;
+
+  const handleSignOut = async () => { await signOut(); navigate('/login'); };
+
+  const pollForOvoCompletion = async (enterpriseId: string, requestId: string, startedAt: string): Promise<{ url: string; fileName: string } | null> => {
+    const maxAttempts = 160; // 160 × 3s = ~8 min max
+    const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min = stale
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const { data: d } = await supabase
+        .from('deliverables')
+        .select('file_url, data')
+        .eq('enterprise_id', enterpriseId)
+        .eq('type', 'plan_ovo_excel')
+        .maybeSingle();
+      if (!d?.data || typeof d.data !== 'object') continue;
+      const meta = d.data as Record<string, unknown>;
+      if (meta.request_id !== requestId && !(meta.generated_at && (meta.generated_at as string) > startedAt)) continue;
+      if (meta.status === 'completed' && meta.file_name) {
+        const { data: signedData, error: signedError } = await supabase.storage
+          .from('ovo-outputs')
+          .createSignedUrl(meta.file_name as string, 3600);
+        if (signedError || !signedData?.signedUrl) {
+          return { url: d.file_url || '', fileName: meta.file_name as string };
+        }
+        return { url: signedData.signedUrl, fileName: meta.file_name as string };
+      }
+      if (meta.status === 'failed') {
+        throw new Error((meta.error as string | undefined) || 'La génération a échoué côté serveur');
+      }
+      // Detect stale processing (started_at too old)
+      if (meta.status === 'processing' && meta.started_at) {
+        const age = Date.now() - new Date(meta.started_at as string).getTime();
+        if (age > STALE_THRESHOLD_MS) {
+          throw new Error('La génération semble bloquée (aucune mise à jour depuis 10 min). Veuillez réessayer.');
+        }
+      }
+    }
+    throw new Error('Délai dépassé (~8 min) — la génération prend trop de temps. Veuillez réessayer.');
+  };
+
+  const handleGenerateOvoPlan = async () => {
+    if (!enterprise) return;
+    if (!enterprise.country) {
+      toast.error('Veuillez renseigner le pays de l\'entreprise avant de lancer la génération.');
+      return;
+    }
+    setGeneratingOvoPlan(true);
+    setOvoDownloadUrl(null);
+    const requestId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+
+      // Gather ALL existing deliverable data
+      const getDelivData = (type: string): Record<string, unknown> => {
+        const d = deliverables.find((d) => d.type === type);
+        return (d?.data && typeof d.data === 'object') ? d.data as Record<string, unknown> : {};
+      };
+
+      const bmcData = getDelivData('bmc_analysis');
+      const inputsData = getDelivData('inputs_data');
+      const frameworkData = getDelivData('framework_data');
+      const sicData = getDelivData('sic_analysis');
+      const planOvoData = getDelivData('plan_ovo');
+      const diagnosticData = getDelivData('diagnostic_data');
+
+      // ── Extract products/services via priority cascade ──
+      const extractItems = (type: 'products' | 'services'): Array<{ name: string; description: string; price?: number; deduit_du_bmc?: boolean }> => {
+        // 1. Previous plan_ovo generation
+        const planOvoArr = planOvoData?.[type] as unknown[];
+        if (Array.isArray(planOvoArr) && planOvoArr.length > 0) {
+          return planOvoArr.map((p) => {
+            const item = p as Record<string, unknown>;
+            return { name: (item.name || item.nom || '') as string, description: (item.description || '') as string, price: (item.price || item.prix || undefined) as number | undefined };
+          });
+        }
+
+        // 2. Explicit products/services from BMC or inputs
+        for (const src of [bmcData, inputsData]) {
+          const arr = (src?.[type] || src?.[type === 'products' ? 'produits' : 'services']) as unknown[] | undefined;
+          if (Array.isArray(arr) && arr.length > 0) {
+            return arr.map((p) => {
+              if (typeof p === 'string') return { name: p, description: '' };
+              const item = p as Record<string, unknown>;
+              return { name: (item.name || item.nom || item.label || '') as string, description: (item.description || '') as string, price: (item.price || item.prix || undefined) as number | undefined };
+            });
+          }
+        }
+
+        // 3. BMC canvas: flux_revenus, proposition_valeur
+        const canvas: any = bmcData?.canvas || {};
+        const items: Array<{ name: string; description: string; price?: number; deduit_du_bmc?: boolean }> = [];
+
+        if (canvas.flux_revenus) {
+          const fr = canvas.flux_revenus;
+          if (fr.produit_principal) items.push({ name: fr.produit_principal, description: 'Produit principal (BMC)', deduit_du_bmc: true });
+          if (fr.sources_revenus) {
+            const sources = Array.isArray(fr.sources_revenus) ? fr.sources_revenus : [fr.sources_revenus];
+            sources.forEach((s: any) => { const item = s as Record<string, unknown>; items.push({ name: typeof s === 'string' ? s : (item.name || item.label || JSON.stringify(s)) as string, description: 'Source de revenus (BMC)', deduit_du_bmc: true }); });
+          }
+        }
+        if (canvas.proposition_valeur) {
+          const pv = canvas.proposition_valeur;
+          if (pv.produits && Array.isArray(pv.produits)) {
+            pv.produits.forEach((p: unknown) => { const item = p as Record<string, unknown>; items.push({ name: typeof p === 'string' ? p : (item.name || item.label || '') as string, description: (pv.enonce as string | undefined) || 'Proposition de valeur (BMC)', deduit_du_bmc: true }); });
+          }
+          if (items.length === 0 && pv.enonce) {
+            items.push({ name: pv.enonce.substring(0, 80), description: 'Proposition de valeur (BMC)', deduit_du_bmc: true });
+          }
+        }
+        if (items.length > 0) return items;
+
+        // 4. Fallback: structure_couts, partenaires_cles
+        if (canvas.structure_couts?.postes && Array.isArray(canvas.structure_couts.postes)) {
+          canvas.structure_couts.postes.forEach((p: unknown) => {
+            const item = p as Record<string, unknown>;
+            const name = typeof p === 'string' ? p : (item.libelle || item.label || item.name || '') as string;
+            if (name) items.push({ name, description: 'Déduit de la structure des coûts (BMC)', deduit_du_bmc: true });
+          });
+        }
+        if (canvas.partenaires_cles?.items && Array.isArray(canvas.partenaires_cles.items)) {
+          canvas.partenaires_cles.items.forEach((p: unknown) => {
+            const item = p as Record<string, unknown>;
+            const name = typeof p === 'string' ? p : (item.name || item.label || '') as string;
+            if (name) items.push({ name, description: 'Déduit des partenaires clés (BMC)', deduit_du_bmc: true });
+          });
+        }
+        if (items.length > 0) return items;
+
+        // 5. Last resort: activites_cles → treat as products/services
+        if (canvas.activites_cles?.items && Array.isArray(canvas.activites_cles.items)) {
+          return canvas.activites_cles.items.map((a: unknown) => {
+            const item = a as Record<string, unknown>;
+            return {
+              name: typeof a === 'string' ? a : (item.name || item.label || '') as string,
+              description: 'Activité clé transformée en produit/service (BMC)',
+              deduit_du_bmc: true,
+            };
+          }).filter((i: any) => i.name);
+        }
+
+        return [];
+      };
+
+      let products = extractItems('products');
+      const services = extractItems('services');
+
+      // Enrich products with CA/marge from framework analyse_marge
+      const margeActivites = ((frameworkData as Record<string, unknown>)?.analyse_marge as Record<string, unknown[]> | undefined)?.activites || [];
+      if (margeActivites.length > 0) {
+        products = products.map((p) => {
+          const match = margeActivites.find((a) => {
+            const act = a as Record<string, unknown>;
+            return ((act.nom || act.name || '') as string).toLowerCase().includes((p.name || '').toLowerCase().substring(0, 8)) ||
+              (p.name || '').toLowerCase().includes(((act.nom || act.name || '') as string).toLowerCase().substring(0, 8));
+          }) as Record<string, unknown> | undefined;
+          if (match) {
+            const ca = (match.ca as number) || 0;
+            const margeBrute = (match.marge_brute as number) || 0;
+            return { ...p, ca, marge_pct: ca > 0 ? Math.round((margeBrute / ca) * 100) : 60 };
+          }
+          return p;
+        });
+      }
+
+      // Add prix_moyen from BMC
+      const bmcFluxRevenus = (bmcData as any)?.canvas?.flux_revenus || {};
+      const prixMoyen = bmcFluxRevenus?.prix_moyen || bmcFluxRevenus?.prix_unitaire || 0;
+      if (prixMoyen > 0 && products.length > 0) {
+        products = products.map(p => ({ ...p, price: p.price || prixMoyen }));
+      }
+
+      // Extract financial KPIs
+      const cr: any = inputsData?.compte_resultat || {};
+      const existingRevenue = cr.chiffre_affaires || cr.ca || (inputsData as any)?.revenue || (inputsData as any)?.chiffre_affaires || 0;
+
+      const payload = {
+        user_id: user?.id,
+        enterprise_id: enterprise.id,
+        request_id: requestId,
+        company: enterprise.name,
+        country: enterprise.country || "",
+        sector: enterprise.sector || "",
+        business_model: (bmcData as any)?.canvas?.proposition_valeur?.enonce || (bmcData as any)?.business_model || (bmcData as any)?.proposition_valeur || "",
+        current_year: new Date().getFullYear(),
+        employees: enterprise.employees_count || 0,
+        existing_revenue: existingRevenue,
+        startup_costs: inputsData?.startup_costs || inputsData?.couts_demarrage || 0,
+        loan_needed: inputsData?.loan_needed || inputsData?.besoin_financement || 0,
+        products,
+        services,
+        bmc_data: bmcData,
+        inputs_data: inputsData,
+        framework_data: frameworkData,
+        sic_data: sicData,
+        plan_ovo_data: planOvoData,
+        diagnostic_data: diagnosticData,
+      };
+
+      let downloadUrl: string | null = null;
+      let fileName = 'PlanFinancierOVO.xlsm';
+
+      try {
+        const response = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-plan-financier`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify(payload),
+          }
+        );
+
+        if (!response.ok) {
+          // HTTP error (400/500) — show the real server error, do NOT fall back to polling
+          const err = await response.json().catch(() => ({ error: 'Erreur inconnue' }));
+          const serverMsg = err.error || 'La génération a échoué';
+          throw new Error(`Échec génération OVO Excel (${response.status}): ${serverMsg}`);
+        }
+
+        const result = await response.json();
+        downloadUrl = result.download_url;
+        fileName = result.file_name || fileName;
+      } catch (fetchErr: any) {
+        // Distinguish real network errors from HTTP errors we already formatted
+        const isHttpError = fetchErr.message?.startsWith('Échec génération OVO Excel');
+        if (isHttpError) {
+          throw fetchErr; // Re-throw HTTP errors directly — don't mask them
+        }
+        // True network error / connection closed — fall back to polling
+        toast.info('Connexion interrompue — vérification en cours (peut prendre 3-5 min)...');
+        const polled = await pollForOvoCompletion(enterprise.id, requestId, startedAt);
+        if (polled) {
+          downloadUrl = polled.url;
+          fileName = polled.fileName;
+        }
+      }
+
+      if (downloadUrl) {
+        setOvoDownloadUrl(downloadUrl);
+        toast.success('Plan Financier OVO généré avec succès !');
+      }
+
+      await fetchData();
+    } catch (err: any) {
+      toast.error(err.message || 'La génération a échoué, veuillez réessayer');
+    } finally {
+      setGeneratingOvoPlan(false);
+    }
+  };
+
+  const handleRegenerateExcel = async () => {
+    if (!enterprise) return;
+    setRegeneratingExcel(true);
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/regenerate-excel-ovo`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ enterprise_id: enterprise.id }),
+        }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: 'Erreur inconnue' }));
+        throw new Error(err.error || `Erreur ${response.status}`);
+      }
+      const result = await response.json();
+      if (result.download_url) {
+        setOvoDownloadUrl(result.download_url);
+        toast.success(`Excel OVO regénéré (${Math.round((result.size_bytes || 0) / 1024)} Ko) — téléchargement...`);
+        // Auto-download via signed URL (no auth header needed — token is in the URL)
+        const dlResp = await fetch(result.download_url);
+        if (dlResp.ok) {
+          const blob = await dlResp.blob();
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = result.file_name || `${enterprise?.name?.replace(/[^a-zA-Z0-9]/g, '_') || 'entreprise'}_PlanFinancierOVO.xlsm`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(a.href);
+        }
+      }
+      await fetchData();
+    } catch (err: any) {
+      toast.error(err.message || 'Échec de la regénération Excel');
+    } finally {
+      setRegeneratingExcel(false);
+    }
+  };
+
+  const handleRegenerateOddExcel = async () => {
+    if (!enterprise) return;
+    setRegeneratingOddExcel(true);
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/regenerate-excel-odd`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ enterprise_id: enterprise.id }),
+        }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: 'Erreur inconnue' }));
+        throw new Error(err.error || `Erreur ${response.status}`);
+      }
+      const result = await response.json();
+      if (result.download_url) {
+        toast.success(`Excel ODD généré (${Math.round((result.size_bytes || 0) / 1024)} Ko) — téléchargement...`);
+        const dlResp = await fetch(result.download_url);
+        if (dlResp.ok) {
+          const blob = await dlResp.blob();
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = result.file_name || `${enterprise?.name?.replace(/[^a-zA-Z0-9]/g, '_') || 'entreprise'}_ODD.xlsx`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(a.href);
+        }
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Échec de la génération Excel ODD');
+    } finally {
+      setRegeneratingOddExcel(false);
+    }
+  };
+
+  const handleDownloadOvoFile = async (url: string) => {
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error('Erreur de téléchargement');
+      const blob = await response.blob();
+      // Try to get real file name from deliverable data
+      const ovoDeliv = deliverables.find((d) => d.type === 'plan_ovo_excel');
+      const realName = (ovoDeliv?.data as Record<string, unknown> | null)?.file_name as string | undefined;
+      const downloadName = realName || `${enterprise?.name?.replace(/[^a-zA-Z0-9]/g, '_') || 'entreprise'}_PlanFinancierOVO.xlsm`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = downloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      toast.success('Fichier téléchargé !');
+    } catch (err: any) {
+      toast.error(err.message || 'Erreur de téléchargement');
+    }
+  };
+
+  const handleDownload = async (type: string, format: string) => {
+    if (!enterprise) return;
+    try {
+      // Plan financier Excel → download .xlsm from Storage (not from download-deliverable)
+      if ((type === 'plan_financier' || type === 'plan_ovo') && format === 'xlsx') {
+        // Try plan_financier deliverable first
+        const planDeliv = deliverables.find((d: any) => d.type === 'plan_financier') || deliverables.find((d: any) => d.type === 'plan_ovo');
+        const excelFilename = (planDeliv?.data as any)?.excel_filename;
+
+        // Also check plan_ovo_excel deliverable (OVO Excel output)
+        const ovoExcelDeliv = deliverables.find((d: any) => d.type === 'plan_ovo_excel');
+        const ovoFileUrl = (ovoExcelDeliv?.data as any)?.status === 'completed' ? ovoExcelDeliv?.file_url : null;
+
+        if (excelFilename) {
+          // Try deliverables bucket
+          const { data: s1 } = await supabase.storage.from('deliverables').createSignedUrl(`${enterprise.id}/${excelFilename}`, 3600);
+          if (s1?.signedUrl) { await handleDownloadOvoFile(s1.signedUrl); return; }
+          // Try ovo-outputs bucket
+          const { data: s2 } = await supabase.storage.from('ovo-outputs').createSignedUrl(excelFilename, 3600);
+          if (s2?.signedUrl) { await handleDownloadOvoFile(s2.signedUrl); return; }
+        }
+
+        // Try direct file_url from plan_ovo_excel
+        if (ovoFileUrl) {
+          await handleDownloadOvoFile(ovoFileUrl);
+          return;
+        }
+        // Fall through to download-deliverable
+      }
+
+      const token = await getValidAccessToken(authSession, navigate);
+      const ts = Date.now();
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/download-deliverable?type=${type}&enterprise_id=${enterprise.id}&format=${format}&_ts=${ts}`;
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      if (!response.ok) { const err = await response.json(); throw new Error(err.error || 'Erreur'); }
+
+      // Validate response for ODD downloads — reject if contaminated with OVO content
+      if (type === 'odd_analysis' && format === 'xlsx') {
+        const contentDisp = response.headers.get('content-disposition') || '';
+        if (contentDisp.includes('.xlsm') || contentDisp.toLowerCase().includes('ovo')) {
+          throw new Error('Fichier ODD incorrect reçu (contamination OVO). Veuillez régénérer le module ODD.');
+        }
+      }
+
+      const blob = await response.blob();
+      // Extract real filename from Content-Disposition (handles .xlsm vs .xlsx)
+      const disposition = response.headers.get('content-disposition') || '';
+      const filenameMatch = disposition.match(/filename="?([^";\n]+)"?/);
+      let downloadName: string;
+      if (filenameMatch?.[1]) {
+        downloadName = filenameMatch[1];
+      } else {
+        const ext = format === 'csv' ? '.csv' : format === 'json' ? '.json' : format === 'xlsx' ? ((type === 'plan_ovo' || type === 'plan_financier') ? '.xlsm' : '.xlsx') : '.html';
+        const label = type === 'odd_analysis' && format === 'xlsx' ? 'ODD' : type;
+        const safeName = enterprise.name.replace(/[^a-zA-Z0-9]/g, '_');
+        downloadName = `${safeName}_${label}${ext}`;
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = downloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      toast.success('Fichier téléchargé !');
+    } catch (err: any) {
+      toast.error(err.message || 'Erreur de téléchargement');
+    }
+  };
+
+  const handleDownloadPdf = async (type: string, filename: string) => {
+    if (!enterprise) return;
+    try {
+      toast.info('Génération du PDF...');
+      const token = await getValidAccessToken(authSession, navigate);
+      // Use edge function format=pdf (server-to-server, no CORS issues)
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/download-deliverable?type=${type}&enterprise_id=${enterprise.id}&format=pdf&_ts=${Date.now()}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `Erreur ${res.status}` }));
+        throw new Error(err.error || `Erreur ${res.status}`);
+      }
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      toast.success('PDF téléchargé');
+    } catch (err: any) {
+      toast.error(`Erreur PDF : ${err.message}`);
+    }
+  };
+
+  const handleDownloadBpWord = async () => {
+    try {
+      const bpDeliv = deliverables.find((d: any) => d.type === 'business_plan');
+      const fileName = (bpDeliv?.data as any)?._meta?.file_name;
+      if (!fileName) throw new Error('Fichier non disponible');
+
+      const { data: signedData, error } = await supabase.storage
+        .from('bp-outputs')
+        .createSignedUrl(fileName, 300);
+
+      if (error || !signedData?.signedUrl) throw new Error('Erreur de téléchargement');
+
+      const response = await fetch(signedData.signedUrl);
+      if (!response.ok) throw new Error('Erreur de téléchargement');
+      const blob = await response.blob();
+
+      const downloadName = fileName || `${enterprise?.name?.replace(/[^a-zA-Z0-9]/g, '_') || 'entreprise'}_BusinessPlan.docx`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = downloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      toast.success('Business Plan Word téléchargé !');
+    } catch (err: any) {
+      toast.error(err.message || 'Erreur de téléchargement');
+    }
+  };
+
+  // Classify uploaded files — exclude reconstruction subfolder from manual upload sections
+  const isReconstructionFile = (f: { name: string }) => f.name.startsWith('reconstruction/');
+  const manualFiles = uploadedFiles.filter(f => !isReconstructionFile(f));
+  void uploadedFiles.filter(f => isReconstructionFile(f)).length; // reconstruction files count
+  const docFiles = manualFiles.filter(f => /\.(docx?|pdf|txt)$/i.test(f.name));
+  const finFiles = manualFiles.filter(f => /\.(xlsx?|csv)$/i.test(f.name));
+  const knownFiles = new Set([...docFiles.map(f => f.name), ...finFiles.map(f => f.name)]);
+  const extraFiles = manualFiles.filter(f => !knownFiles.has(f.name));
+  void (docFiles.length + finFiles.length); // inputsCount
+  void deliverables.length; // deliverablesCount
+
+  // No enterprise yet
+  if (initialLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+  if (!enterprise) {
+    if (coachMode) {
+      return (
+        <div className="min-h-screen bg-background flex flex-col items-center justify-center gap-4">
+          <div className="text-center space-y-2">
+            <Building2 className="h-12 w-12 text-muted-foreground mx-auto" />
+            <h2 className="text-xl font-display font-bold">Entreprise introuvable</h2>
+            <p className="text-muted-foreground text-sm">Les données de cette entreprise ne sont pas accessibles.</p>
+          </div>
+          {onBack && <Button variant="outline" onClick={onBack}>{t('common.back')}</Button>}
+        </div>
+      );
+    }
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="border-b bg-card/80 backdrop-blur-sm">
+          <div className="container flex h-14 items-center justify-between">
+            <span className="font-display font-bold text-lg tracking-tight">ESONO</span>
+          </div>
+        </header>
+        <div className="container py-20 flex justify-center">
+          <Card className="max-w-md w-full">
+            <div className="p-6 text-center">
+              <div className="mx-auto h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
+                <Building2 className="h-8 w-8 text-primary" />
+              </div>
+              <h2 className="text-xl font-display font-bold mb-4">{t('dashboard_coach.add_enterprise')}</h2>
+              <Dialog open={showCreate} onOpenChange={setShowCreate}>
+                <DialogTrigger asChild>
+                  <Button className="w-full gap-2"><Plus className="h-4 w-4" /> {t('common.add')}</Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader><DialogTitle className="font-display">{t('dashboard_coach.add_enterprise')}</DialogTitle></DialogHeader>
+                  <div className="space-y-3 mt-4 max-h-[60vh] overflow-y-auto pr-1">
+                    <div className="space-y-1.5"><Label>{t('dashboard_coach.enterprise_name')} *</Label><Input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Ex: EcoBuild CI SARL" /></div>
+                    <div className="space-y-1.5"><Label>{t('dashboard_coach.sector')}</Label><Input value={newSector} onChange={e => setNewSector(e.target.value)} placeholder="Recyclage, Agroalimentaire..." /></div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5"><Label>{t('dashboard_coach.country')} *</Label><select value={newCountry} onChange={e => setNewCountry(e.target.value)} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"><option value="" disabled>— Sélectionner —</option>{SUPPORTED_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+                      <div className="space-y-1.5"><Label>{t('dashboard_coach.city')}</Label><Input value={newCity} onChange={e => setNewCity(e.target.value)} placeholder="Abidjan" /></div>
+                    </div>
+                    <div className="space-y-1.5"><Label>Forme juridique</Label><Input value={newLegalForm} onChange={e => setNewLegalForm(e.target.value)} placeholder="SARL, SA, SAS..." /></div>
+                    <div className="space-y-1.5"><Label>{t('dashboard_coach.description')}</Label><Input value={newDescription} onChange={e => setNewDescription(e.target.value)} placeholder="Décrivez votre activité..." /></div>
+                    <Button className="w-full" onClick={createEnterprise} disabled={creating || !newName.trim() || !newCountry}>
+                      {creating ? t('common.loading') : t('dashboard_coach.add_enterprise')}
+                    </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  // Get the selected module config & deliverable
+  const selectedMod = MODULE_CONFIG.find(m => m.code === selectedModule);
+  const delivTypeMap: Record<string, string> = {
+    bmc: 'bmc_analysis', sic: 'sic_analysis', inputs: 'inputs_data', framework: 'framework_data',
+    diagnostic: 'diagnostic_data', plan_ovo: 'plan_ovo', plan_financier: 'plan_financier',
+    business_plan: 'business_plan', odd: 'odd_analysis',
+    screening: 'screening_report', pre_screening: 'pre_screening',
+    valuation: 'valuation', onepager: 'onepager', investment_memo: 'investment_memo',
+  };
+  const selectedDelivType = delivTypeMap[selectedModule];
+  const selectedDeliv = selectedDelivType ? getDeliverable(selectedDelivType) : null;
+
+  const handleGenerateScreening = async () => {
+    if (!enterprise) return;
+    if (!enterprise.country) {
+      toast.error('Veuillez renseigner le pays de l\'entreprise avant de lancer la génération.');
+      return;
+    }
+    setGeneratingScreening(true);
+    try {
+      const token = await getValidAccessToken(authSession, navigate);
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-screening-report`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ enterprise_id: enterprise.id }),
+        }
+      );
+      if (!response.ok) { const err = await response.json(); throw new Error(err.error || 'Erreur'); }
+      const result = await response.json();
+      toast.success(`Décision programme terminée ! Score: ${result.score}/100`);
+      setSelectedModule('screening');
+      await fetchData();
+    } catch (err: any) {
+      toast.error(err.message || 'Erreur de décision programme');
+    } finally {
+      setGeneratingScreening(false);
+    }
+  };
+
+  return (
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
+      {/* ===== TOP HEADER ===== */}
+      <header className="flex-none h-14 border-b border-border bg-card flex items-center px-6 z-50">
+        {showBackButton && onBack && (
+          <Button variant="ghost" size="sm" onClick={onBack} className="mr-2">
+            <ArrowLeft className="h-4 w-4 mr-1" /> {t('common.back')}
+          </Button>
+        )}
+        <span className="font-display font-bold text-lg tracking-tight">ESONO</span>
+        <span className="mx-3 text-muted-foreground">·</span>
+        <span className="text-sm font-medium text-foreground">{enterprise.name}</span>
+        <Button variant="ghost" size="icon" className="h-7 w-7 ml-1" onClick={openEditDialog}>
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
+        <div className="ml-2">
+          <CoherenceBadge enterpriseId={enterprise.id} />
+        </div>
+        {coachMode && enterprise.organization_id && (
+          <div className="ml-4 border-l pl-4">
+            <EnterpriseCoachesManager
+              enterpriseId={enterprise.id}
+              organizationId={enterprise.organization_id}
+              canManage={isSuperAdmin || !!memberships.find(m => m.organization.id === enterprise.organization_id && ['owner', 'admin', 'manager'].includes(m.role))}
+            />
+          </div>
+        )}
+        <div className="mr-auto" />
+        <div className="flex items-center gap-4">
+          <span className="text-sm text-foreground">
+            {profile?.full_name} · <span className="text-muted-foreground">{profile?.email}</span>
+          </span>
+          {!coachMode && (
+            <Button variant="outline" size="sm" className="gap-2" onClick={handleSignOut}>
+              <LogOut className="h-4 w-4" /> {t('nav.logout')}
+            </Button>
+          )}
+        </div>
+      </header>
+
+      {/* ===== EDIT ENTERPRISE DIALOG ===== */}
+      <Dialog open={showEdit} onOpenChange={setShowEdit}>
+        <DialogContent>
+          <DialogHeader><DialogTitle className="font-display">{t('common.edit')}</DialogTitle></DialogHeader>
+          <div className="space-y-3 mt-4 max-h-[60vh] overflow-y-auto pr-1">
+            <div className="space-y-1.5"><Label>{t('dashboard_coach.enterprise_name')} *</Label><Input value={editName} onChange={e => setEditName(e.target.value)} /></div>
+            <div className="space-y-1.5"><Label>{t('dashboard_coach.sector')}</Label><Input value={editSector} onChange={e => setEditSector(e.target.value)} /></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5"><Label>{t('dashboard_coach.country')}</Label><select value={editCountry} onChange={e => setEditCountry(e.target.value)} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">{SUPPORTED_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}</select></div>
+              <div className="space-y-1.5"><Label>{t('dashboard_coach.city')}</Label><Input value={editCity} onChange={e => setEditCity(e.target.value)} /></div>
+            </div>
+            <div className="space-y-1.5"><Label>Forme juridique</Label><Input value={editLegalForm} onChange={e => setEditLegalForm(e.target.value)} /></div>
+            <div className="space-y-1.5"><Label>{t('dashboard_coach.description')}</Label><Input value={editDescription} onChange={e => setEditDescription(e.target.value)} /></div>
+            <Button className="w-full" onClick={saveEnterprise} disabled={saving || !editName.trim()}>
+              {saving ? t('common.saving') : t('common.save')}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ===== EXTRACT ENTERPRISE INFO DIALOG ===== */}
+      <Dialog open={showExtractDialog} onOpenChange={setShowExtractDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="font-display">Informations détectées</DialogTitle>
+            <DialogDescription>
+              D'après vos documents, nous avons identifié les informations suivantes :
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 mt-2">
+            {extractedInfo?.name && (
+              <div className="flex items-center justify-between p-3 rounded-lg bg-muted">
+                <span className="text-sm text-muted-foreground">{t('dashboard_coach.enterprise_name')}</span>
+                <span className="text-sm font-semibold">{extractedInfo.name}</span>
+              </div>
+            )}
+            {extractedInfo?.country && (
+              <div className="flex items-center justify-between p-3 rounded-lg bg-muted">
+                <span className="text-sm text-muted-foreground">{t('dashboard_coach.country')}</span>
+                <span className="text-sm font-semibold">{extractedInfo.country}</span>
+              </div>
+            )}
+            {extractedInfo?.sector && (
+              <div className="flex items-center justify-between p-3 rounded-lg bg-muted">
+                <span className="text-sm text-muted-foreground">{t('dashboard_coach.sector')}</span>
+                <span className="text-sm font-semibold">{extractedInfo.sector}</span>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => { setShowExtractDialog(false); setExtractedInfo(null); }}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={handleConfirmExtraction} disabled={saving}>
+              {saving ? t('common.saving') : t('common.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* ===== ACTION BUTTONS BAR (sticky en haut, toujours visible) ===== */}
+      {!readOnly && (
+        <div className="sticky top-0 z-30 flex-none border-b border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 px-6 py-3 flex items-center justify-center gap-3 shadow-sm">
+          <Button
+            size="sm"
+            className="gap-2 bg-violet-600 text-white hover:bg-violet-900 shadow-sm"
+            onClick={() => setSelectedModule('upload')}
+          >
+            <Upload className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Uploader des documents</span>
+          </Button>
+          <Button
+            size="sm"
+            className="gap-2 bg-violet-600 text-white hover:bg-violet-900 shadow-sm"
+            onClick={() => handleGenerateModule('pre_screening')}
+            disabled={generating || !!generatingModule}
+          >
+            <Search className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Générer le diagnostic</span>
+          </Button>
+          <Button
+            size="sm"
+            className="gap-2 bg-violet-600 text-white hover:bg-violet-900 shadow-sm"
+            onClick={() => handleGenerate(false)}
+            disabled={generating}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">{generating ? 'Génération en cours...' : 'Générer tous les livrables'}</span>
+          </Button>
+          {generating && (
+            <Button variant="destructive" size="sm" className="gap-2" onClick={handleStopGeneration}>
+              <X className="h-3.5 w-3.5" />
+              <span className="text-xs">Arrêter</span>
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* ===== MAIN AREA: Sidebar + Content ===== */}
+      <div className="flex-1 min-h-0 flex">
+        {/* Sidebar */}
+        <DashboardSidebar
+          enterprise={enterprise}
+          deliverables={deliverables}
+          modules={modules}
+          selectedModule={selectedModule}
+          onSelectModule={setSelectedModule}
+          onGenerateAll={() => handleGenerate(false)}
+          onStopGeneration={handleStopGeneration}
+          generating={generating}
+          generationProgress={generationProgress}
+          globalScore={globalScore}
+          hideActions={readOnly}
+        />
+
+        {/* CENTER PANEL: Content */}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {/* Module title bar */}
+          {selectedModule !== 'overview' && (
+            <div className="flex-none h-12 border-b border-border bg-card/50 flex items-center px-6 gap-3">
+              {selectedMod && (
+                <>
+                  <selectedMod.icon className="h-5 w-5 text-muted-foreground" />
+                  <h1 className="font-display font-semibold text-base">{selectedMod.title}</h1>
+                </>
+              )}
+              {selectedModule === 'screening' && (
+                <>
+                  <Search className="h-5 w-5 text-muted-foreground" />
+                  <h1 className="font-display font-semibold text-base">Décision programme</h1>
+                </>
+              )}
+              {selectedModule === 'pre_screening' && (
+                <>
+                  <FileSearch className="h-5 w-5 text-muted-foreground" />
+                  <h1 className="font-display font-semibold text-base">Diagnostic initial</h1>
+                </>
+              )}
+              {selectedModule === 'dataroom' && (
+                <>
+                  <FolderPlus className="h-5 w-5 text-muted-foreground" />
+                  <h1 className="font-display font-semibold text-base">Data Room</h1>
+                </>
+              )}
+              {(selectedModule === 'upload' || selectedModule === 'reconstruction') && (
+                <>
+                  <FolderPlus className="h-5 w-5 text-muted-foreground" />
+                  <h1 className="font-display font-semibold text-base">{t('dashboard_coach.documents')}</h1>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Scrollable content */}
+          <div className="flex-1 overflow-y-auto">
+            {/* Inputs diff banner — only on reconstruction/inputs module */}
+            {enterprise && (selectedModule === 'inputs' || selectedModule === 'reconstruction') && <InputsDiffBanner enterpriseId={enterprise.id} />}
+            {/* Overview / Home */}
+            {selectedModule === 'overview' ? (
+              <DashboardOverview
+                enterprise={enterprise}
+                deliverables={deliverables}
+                modules={modules}
+                globalScore={globalScore}
+                onSelectModule={setSelectedModule}
+              />
+            ) : selectedModule === 'upload' ? (
+              /* Upload panel */
+              <div className="p-6 max-w-2xl mx-auto space-y-4">
+                <h2 className="font-display font-bold text-lg mb-2">{t('dashboard_coach.documents')}</h2>
+                <p className="text-xs text-muted-foreground mb-4">{t('dashboard_coach.upload_cumulative_hint')}</p>
+                <div>
+                  <ReconstructionUploader
+                    enterpriseId={enterprise.id}
+                    session={authSession}
+                    navigate={navigate}
+                    onComplete={fetchData}
+                  />
+                </div>
+              </div>
+            ) : selectedModule === 'reconstruction' ? (
+              /* Reconstruction result — frozen view */
+              <div className="p-6 max-w-2xl mx-auto space-y-4 bg-white">
+                {(() => {
+                  const inputsDeliv = deliverables.find(d => d.type === 'inputs_data');
+                  const data = (inputsDeliv?.data && typeof inputsDeliv.data === 'object') ? inputsDeliv.data as Record<string, any> : null;
+                  const score = data?.score_confiance;
+                  const report = data?.reconstruction_report;
+                  const mode = (enterprise as any)?.operating_mode;
+
+                  if (!data || typeof score !== 'number') {
+                    return (
+                      <div className="text-center py-12 text-muted-foreground">
+                        <p className="text-lg font-medium">Aucune reconstruction effectuée</p>
+                        <p className="text-sm mt-2">Uploadez des documents puis lancez la reconstruction pour voir les résultats ici.</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-4">
+                        <div className={`text-3xl font-bold ${score >= 70 ? 'text-emerald-600' : score >= 40 ? 'text-amber-600' : 'text-red-500'}`}>
+                          {score}%
+                        </div>
+                        <div>
+                          <p className="font-semibold">Confiance de la reconstruction</p>
+                          {mode && <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{mode}</span>}
+                        </div>
+                      </div>
+
+                      {report?.note_analyste && (
+                        <div className="rounded-lg border p-4 space-y-1">
+                          <p className="text-sm font-medium">Note de l'analyste IA</p>
+                          <p className="text-sm text-muted-foreground">{report.note_analyste}</p>
+                        </div>
+                      )}
+
+                      {report?.hypotheses?.length > 0 && (
+                        <div className="rounded-lg border p-4 space-y-2">
+                          <p className="text-sm font-medium flex items-center gap-1.5">⚠️ Hypothèses utilisées</p>
+                          <ul className="space-y-1">
+                            {report.hypotheses.map((h: string, i: number) => (
+                              <li key={i} className="text-sm text-muted-foreground flex items-start gap-2">
+                                <span className="text-amber-500 mt-0.5">•</span> {h}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {report?.donnees_manquantes?.length > 0 && (
+                        <div className="rounded-lg border p-4 space-y-2">
+                          <p className="text-sm font-medium">Données manquantes</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {report.donnees_manquantes.map((d: string, i: number) => (
+                              <span key={i} className="text-xs px-2 py-1 rounded-md bg-muted text-muted-foreground">{d}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {report?.source_documents?.length > 0 && (
+                        <div className="rounded-lg border p-4 space-y-2">
+                          <p className="text-sm font-medium">{report.source_documents.length} documents analysés</p>
+                          <ul className="space-y-1">
+                            {report.source_documents.map((doc: string, i: number) => (
+                              <li key={i} className="text-xs text-muted-foreground">📄 {doc}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : selectedModule === 'coach_info' ? (
+              /* Information du coach — coaching notes moved here */
+              <div className="p-6 max-w-2xl mx-auto">
+                <h2 className="font-display font-bold text-lg mb-4">Information du coach</h2>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Notes de réunion, compte-rendus et informations contextuelles pour personnaliser le diagnostic et les livrables.
+                </p>
+                <CoachingTab enterpriseId={enterprise.id} enterpriseName={enterprise.name || ''} viewMode="notes_only" />
+              </div>
+            ) : selectedModule === 'sources' ? (
+              <div className="p-6">
+                <SourcesViewer />
+              </div>
+            ) : selectedModule === 'dataroom' && enterprise && user ? (
+              <div className="p-6">
+                <DataRoomManager enterpriseId={enterprise.id} userId={user.id} dataRoomSlug={(enterprise as any).data_room_slug || ''} />
+              </div>
+            ) : selectedModule === 'pre_screening' && selectedDeliv?.data && typeof selectedDeliv.data === 'object' ? (
+              <div className="p-6">
+                {/* Barre d'actions unifiée — diagnostic */}
+                {(() => {
+                  // Style uniforme: blanc avec contour violet pour tous les CTA
+                  const btnOutline = "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-violet-700 border border-violet-400 text-xs font-semibold hover:bg-violet-50 hover:border-violet-600 transition-colors disabled:opacity-50";
+                  const btnPrimary = "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-violet-700 border border-violet-400 text-xs font-semibold hover:bg-violet-50 hover:border-violet-600 transition-colors disabled:opacity-50";
+                  const entName = enterprise?.name || 'entreprise';
+                  const regenerate = async () => {
+                    if (!enterprise) return;
+                    try {
+                      const token = await getValidAccessToken(authSession, navigate);
+                      const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-pre-screening`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ enterprise_id: enterprise.id }),
+                      });
+                      if (!resp.ok) throw new Error('Erreur');
+                      toast.success('Diagnostic regénéré !');
+                      await fetchData();
+                    } catch { toast.error('Erreur diagnostic'); }
+                  };
+                  return (
+                    <div className="mb-4 rounded-xl border border-border bg-white p-4 shadow-sm">
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="h-10 w-10 rounded-lg bg-violet-50 flex items-center justify-center">
+                            <Stethoscope className="h-5 w-5 text-violet-600" />
+                          </div>
+                          <p className="text-sm font-semibold text-foreground">Diagnostic initial</p>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          <button onClick={() => handleDownload('pre_screening', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>
+                          <button onClick={() => handleDownloadPdf('pre_screening', `Diagnostic_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                          <TranslateButton containerRef={viewerContainerRef} className={btnOutline} />
+                          {!readOnly && (
+                            <button onClick={regenerate} className={btnOutline}>
+                              <Sparkles className="h-3.5 w-3.5" /> {t('dashboard_coach.regenerate')}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+                <div ref={viewerContainerRef}>
+                  <PreScreeningViewer
+                    data={selectedDeliv.data as Record<string, any>}
+                    enterprise={enterprise}
+                    enterpriseId={enterprise?.id}
+                    onUpdated={fetchData}
+                    onRegenerate={async (programmeId?: string | null) => {
+                      if (!enterprise) return;
+                      try {
+                        const token = await getValidAccessToken(authSession, navigate);
+                        const body: any = { enterprise_id: enterprise.id };
+                        if (programmeId) body.programme_criteria_id = programmeId;
+                        const resp = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-pre-screening`, {
+                          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify(body),
+                        });
+                        if (!resp.ok) throw new Error('Erreur');
+                        toast.success('Diagnostic initial regénéré !');
+                        await fetchData();
+                      } catch { toast.error('Erreur de diagnostic initial'); }
+                    }}
+                    onLaunchPipeline={() => handleGenerate()}
+                  />
+                </div>
+              </div>
+            ) : selectedModule === 'screening' && selectedDeliv?.data && typeof selectedDeliv.data === 'object' ? (
+              <div className="p-6">
+                <ScreeningReportViewer data={selectedDeliv.data as Record<string, any>} enterpriseId={enterprise?.id} enterpriseName={enterprise?.name} onRegenerate={handleGenerateScreening} onUpdated={fetchData} />
+              </div>
+            ) : selectedDeliv?.data && typeof selectedDeliv.data === 'object' ? (
+              <div className="p-6">
+                <ValidationBanner validation={(selectedDeliv.data as any)?._validation} />
+
+                {/* ═══════════ BARRE D'ACTIONS UNIFIÉE ═══════════ */}
+                {(() => {
+                  const moduleCfg: Record<string, { icon: React.ReactNode; title: string }> = {
+                    diagnostic: { icon: <Stethoscope className="h-5 w-5 text-primary" />, title: 'Diagnostic Expert' },
+                    bmc: { icon: <LayoutGrid className="h-5 w-5 text-primary" />, title: 'Business Model Canvas' },
+                    sic: { icon: <Globe className="h-5 w-5 text-primary" />, title: 'Social Impact Canvas' },
+                    framework: { icon: <FileSpreadsheet className="h-5 w-5 text-primary" />, title: 'Plan Financier Intermédiaire' },
+                    plan_financier: { icon: <BarChart3 className="h-5 w-5 text-primary" />, title: 'Plan Financier' },
+                    plan_ovo: { icon: <FileSpreadsheet className="h-5 w-5 text-primary" />, title: 'Plan Financier OVO (Excel)' },
+                    business_plan: { icon: <FileText className="h-5 w-5 text-primary" />, title: 'Business Plan OVO' },
+                    odd: { icon: <Target className="h-5 w-5 text-primary" />, title: 'ODD' },
+                    onepager: { icon: <FileText className="h-5 w-5 text-primary" />, title: 'One-Pager I&P' },
+                    valuation: { icon: <BarChart3 className="h-5 w-5 text-primary" />, title: 'Valorisation' },
+                    investment_memo: { icon: <FileText className="h-5 w-5 text-primary" />, title: "Mémo d'Investissement" },
+                  };
+                  const cfg = moduleCfg[selectedModule] || { icon: <FileText className="h-5 w-5 text-primary" />, title: selectedModule };
+                  // Style uniforme: blanc avec contour violet pour tous les CTA
+                  const btnOutline = "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-violet-700 border border-violet-400 text-xs font-semibold hover:bg-violet-50 hover:border-violet-600 transition-colors disabled:opacity-50";
+                  const btnPrimary = "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-violet-700 border border-violet-400 text-xs font-semibold hover:bg-violet-50 hover:border-violet-600 transition-colors disabled:opacity-50";
+                  const btnSecondary = "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-violet-700 border border-violet-400 text-xs font-semibold hover:bg-violet-50 hover:border-violet-600 transition-colors disabled:opacity-50";
+                  const entName = enterprise?.name || 'entreprise';
+
+                  // Module-specific download buttons
+                  const downloadBtns: React.ReactNode[] = [];
+                  if (selectedModule === 'diagnostic') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('diagnostic_data', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('diagnostic_data', `Diagnostic_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  } else if (selectedModule === 'bmc') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('bmc_analysis', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('bmc_analysis', `BMC_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  } else if (selectedModule === 'sic') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('sic_analysis', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('sic_analysis', `SIC_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  } else if (selectedModule === 'framework') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('framework_data', 'html')} className={btnPrimary}><Download className="h-3.5 w-3.5" /> HTML</button>
+                    );
+                  } else if (selectedModule === 'plan_financier') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('plan_financier', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('plan_financier', `PlanFinancier_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>,
+                      <button key="excel" onClick={handleRegenerateExcel} disabled={regeneratingExcel || !deliverables.find((d: any) => d.type === 'plan_financier')} className={btnSecondary} title="Regénère le gabarit OVO (.xlsm) à partir des données existantes (sans IA)">
+                        {regeneratingExcel ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />} Excel OVO
+                      </button>,
+                      <button
+                        key="excel-data"
+                        onClick={() => {
+                          const planData = deliverables.find((d: any) => d.type === 'plan_financier')?.data;
+                          if (!planData) { toast.error('Aucune donnée de plan financier à exporter.'); return; }
+                          const safe = (enterprise?.name || 'entreprise').replace(/[^a-zA-Z0-9]/g, '_');
+                          toast.info('Génération du fichier Excel...');
+                          downloadPlanFinancierExcel(planData, `Donnees_PlanFinancier_${safe}.xlsx`)
+                            .then(() => toast.success('Excel téléchargé — vérifie ton dossier Téléchargements.'))
+                            .catch((e) => { console.error('[Excel données] export error:', e); toast.error(`Échec de l'export Excel : ${e?.message || 'erreur inconnue'}`); });
+                        }}
+                        disabled={!deliverables.find((d: any) => d.type === 'plan_financier')}
+                        className={btnSecondary}
+                        title="Exporte un Excel simple et lisible (un onglet par section, sans formules) à recopier dans le modèle OVO"
+                      >
+                        <FileSpreadsheet className="h-3.5 w-3.5" /> Excel données
+                      </button>
+                    );
+                  } else if (selectedModule === 'plan_ovo') {
+                    if (generatingOvoPlan) {
+                      downloadBtns.push(<div key="gen" className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-semibold"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('common.generating')}</div>);
+                    } else if (ovoDownloadUrl || deliverables.find((d: any) => d.type === 'plan_ovo_excel')?.file_url) {
+                      downloadBtns.push(
+                        <button key="excel" onClick={() => handleDownloadOvoFile(ovoDownloadUrl || deliverables.find((d: any) => d.type === 'plan_ovo_excel')?.file_url)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> Excel</button>
+                      );
+                    } else {
+                      downloadBtns.push(
+                        <button key="gen" onClick={handleGenerateOvoPlan} className={btnPrimary}><Sparkles className="h-3.5 w-3.5" /> {t('common.generate')} Excel OVO</button>
+                      );
+                    }
+                  } else if (selectedModule === 'business_plan') {
+                    if (generatingModule === 'business_plan') {
+                      downloadBtns.push(<div key="gen" className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-semibold"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('common.generating')}</div>);
+                    } else if ((selectedDeliv?.data as any)?._meta?.download_url) {
+                      downloadBtns.push(<button key="word" onClick={() => handleDownloadBpWord()} className={btnPrimary}><Download className="h-3.5 w-3.5" /> Word</button>);
+                    }
+                  } else if (selectedModule === 'odd') {
+                    downloadBtns.push(
+                      <button key="excel" onClick={handleRegenerateOddExcel} disabled={regeneratingOddExcel || !deliverables.find((d: any) => d.type === 'odd_analysis')} className={btnSecondary} title="Génère l'Excel ODD à partir des données existantes">
+                        {regeneratingOddExcel ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />} Excel ODD
+                      </button>,
+                      <button key="html" onClick={() => handleDownload('odd_analysis', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>
+                    );
+                  } else if (selectedModule === 'onepager') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('onepager', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('onepager', `OnePager_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  } else if (selectedModule === 'valuation') {
+                    downloadBtns.push(
+                      <button key="html" onClick={() => handleDownload('valuation', 'html')} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML</button>,
+                      <button key="pdf" onClick={() => handleDownloadPdf('valuation', `Valorisation_${entName}.pdf`)} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  } else if (selectedModule === 'investment_memo') {
+                    const memoTitle = (selectedDeliv?.data as any)?.page_de_garde?.titre?.replace(/[^a-zA-Z0-9]/g, '_') || 'memo';
+                    downloadBtns.push(
+                      <button key="html" onClick={() => {
+                        try {
+                          const html = generateMemoHtml(selectedDeliv.data as any);
+                          const blob = new Blob([html], { type: 'text/html' });
+                          const a = document.createElement('a');
+                          a.href = URL.createObjectURL(blob);
+                          a.download = `InvestmentMemo_${memoTitle}.html`;
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                        } catch (err: any) { toast.error(`Erreur HTML : ${err.message}`); }
+                      }} className={btnOutline}><Download className="h-3.5 w-3.5" /> HTML (A4)</button>,
+                      <button key="pdf" onClick={async () => {
+                        try {
+                          const html = generateMemoHtml(selectedDeliv.data as any);
+                          await exportToPdf(html, `InvestmentMemo_${memoTitle}.pdf`);
+                          toast.success('PDF téléchargé');
+                        } catch (err: any) { toast.error(`Erreur PDF : ${err.message}`); }
+                      }} className={btnPrimary}><Download className="h-3.5 w-3.5" /> PDF</button>
+                    );
+                  }
+
+                  return (
+                    <div className="mb-4 rounded-xl border border-border bg-white p-4 shadow-sm">
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="h-10 w-10 rounded-lg bg-violet-50 flex items-center justify-center [&>svg]:text-violet-600">{cfg.icon}</div>
+                          <p className="text-sm font-semibold text-foreground">{cfg.title}</p>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          {downloadBtns}
+                          <TranslateButton containerRef={viewerContainerRef} className={btnOutline} />
+                          {!readOnly && (
+                            <button
+                              onClick={() => handleGenerateModule(selectedModule)}
+                              disabled={!!generatingModule}
+                              className={btnOutline}
+                            >
+                              {generatingModule === selectedModule ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                              {t('dashboard_coach.regenerate')}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Stale banner + Viewers */}
+                <DeliverableViewer
+                  moduleCode={selectedModule}
+                  data={selectedDeliv.data}
+                  allDeliverables={deliverables}
+                  onRegenerate={() => handleGenerateModule(selectedModule)}
+                  enterpriseId={enterprise?.id}
+                  onUpdated={fetchData}
+                  deliverableUpdatedAt={selectedDeliv.updated_at}
+                  dataChangedAt={(enterprise as any)?.data_changed_at}
+                  viewerContainerRef={viewerContainerRef}
+                />
+              </div>
+            ) : selectedModule === 'investment_memo' ? (
+              <div className="flex flex-col items-center justify-center h-64 text-center px-6">
+                <FileText className="h-16 w-16 text-muted-foreground/20 mb-4" />
+                <h3 className="font-semibold text-lg mb-2">Mémo d'Investissement</h3>
+                <p className="text-sm text-muted-foreground/70 max-w-sm mb-6">
+                  Génération en 2 passes (~6 min chacune).
+                </p>
+                <button
+                  onClick={() => handleGenerateModule('investment_memo')}
+                  disabled={generating}
+                  className="flex items-center gap-2 px-6 py-3 rounded-lg bg-slate-700 text-white text-sm font-semibold hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-50"
+                >
+                  {generatingModule === 'investment_memo' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {t('common.generate')} — {t('modules.investment_memo')}
+                </button>
+              </div>
+            ) : selectedModule === 'plan_financier' ? (
+              <div className="flex flex-col items-center justify-center h-64 text-center px-6">
+                <BarChart3 className="h-16 w-16 text-muted-foreground/20 mb-4" />
+                <h3 className="font-semibold text-lg mb-2">Plan Financier</h3>
+                <p className="text-sm text-muted-foreground/70 max-w-sm mb-6">
+                  Génère le plan financier complet (projections, ratios, CAPEX, etc.)
+                </p>
+                <button
+                  onClick={() => handleGenerateModule('plan_financier')}
+                  disabled={generating}
+                  className="flex items-center gap-2 px-6 py-3 rounded-lg bg-purple-600 text-white text-sm font-semibold hover:bg-purple-700 transition-colors shadow-sm disabled:opacity-50"
+                >
+                  {generatingModule === 'plan_financier' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {t('common.generate')} — {t('modules.plan_financier')}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                <div className="mb-4">
+                  <Sparkles className="h-16 w-16 text-muted-foreground/20" />
+                </div>
+                <h3 className="font-display font-semibold text-lg text-muted-foreground mb-2">{t('common.generate')}</h3>
+                <p className="text-sm text-muted-foreground/70 max-w-sm">
+                  {t('dashboard_coach.generate_pipeline')}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ===== NON-BLOCKING GENERATION PROGRESS BANNER ===== */}
+      {generating && generationProgress && (
+        <div className="fixed top-0 left-0 right-0 z-[100] bg-primary text-primary-foreground shadow-lg">
+          <div className="container flex items-center gap-3 py-2 px-4">
+            <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
+            <span className="text-sm font-medium truncate">
+              {t('pipeline.step_of', { current: generationProgress.current, total: generationProgress.total })} : {generationProgress.name}
+            </span>
+            <Progress
+              value={(generationProgress.current / generationProgress.total) * 100}
+              className="h-1.5 flex-1 max-w-xs bg-primary-foreground/20"
+            />
+            <span className="text-xs opacity-80 flex-shrink-0">
+              Vous pouvez consulter les livrables disponibles
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

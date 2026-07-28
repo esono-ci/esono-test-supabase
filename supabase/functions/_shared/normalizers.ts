@@ -1,0 +1,1743 @@
+/**
+ * Normalizers for AI JSON responses
+ * Handles key variations from different AI model outputs
+ */
+import { getFiscalParams } from "./helpers_v5.ts";
+import { getSectorGuardrails } from "./financial-knowledge.ts";
+
+// ===== FINANCIAL TRUTH ANCHOR =====
+/**
+ * Extrait la vérité financière des inputs_data.
+ * C'est la SOURCE UNIQUE de vérité pour tous les agents.
+ * Tout chiffre financier produit par l'IA qui dévie de ces valeurs doit être corrigé.
+ */
+export function getFinancialTruth(inputsData: any): {
+  ca_n: number;
+  ca_n_minus_1: number;
+  ca_n_minus_2: number;
+  marge_brute: number;
+  marge_brute_pct: number;
+  ebitda: number;
+  ebitda_pct: number;
+  resultat_net: number;
+  tresorerie_nette: number;
+  endettement: number;
+  capitaux_propres: number;
+  total_actif: number;
+  charges_personnel: number;
+  annee_n: number;
+} | null {
+  if (!inputsData) return null;
+
+  const cr = inputsData.compte_resultat || {};
+  const bilan = inputsData.bilan || {};
+  const actif = bilan.actif || {};
+  const passif = bilan.passif || {};
+  const hist = inputsData.historique_3ans || {};
+
+  const ca_n = toNumber(cr.chiffre_affaires, 0);
+  if (ca_n <= 0) return null;
+
+  // Historique — chercher dans historique_3ans
+  const years = Object.keys(hist).sort();
+  let ca_n_minus_1 = 0, ca_n_minus_2 = 0;
+  if (years.length >= 2) {
+    ca_n_minus_1 = toNumber(hist[years[years.length - 2]]?.ca_total || hist[years[years.length - 2]]?.chiffre_affaires, 0);
+  }
+  if (years.length >= 3) {
+    ca_n_minus_2 = toNumber(hist[years[years.length - 3]]?.ca_total || hist[years[years.length - 3]]?.chiffre_affaires, 0);
+  }
+  // Fallback
+  if (ca_n_minus_1 === 0 && inputsData.ca_year_minus_1) ca_n_minus_1 = toNumber(inputsData.ca_year_minus_1, 0);
+  if (ca_n_minus_2 === 0 && inputsData.ca_year_minus_2) ca_n_minus_2 = toNumber(inputsData.ca_year_minus_2, 0);
+
+  const cout_ventes = toNumber(cr.cout_ventes || cr.cout_des_ventes || cr.cogs, 0);
+  const marge_brute = ca_n - cout_ventes;
+  const charges_personnel = toNumber(cr.charges_personnel || cr.personnel, 0);
+  const charges_externes = toNumber(cr.charges_externes || cr.services_exterieurs, 0);
+  const ebitda = marge_brute - charges_personnel - charges_externes;
+  const resultat_net = toNumber(cr.resultat_net, 0);
+
+  const tresorerie = toNumber(actif.tresorerie, 0);
+  const tresorerie_nette = tresorerie - toNumber(passif.tresorerie_passif, 0);
+
+  const dettes_financieres = toNumber(passif.dettes_financieres || passif.emprunts, 0);
+  const capitaux_propres = toNumber(passif.capitaux_propres, 0);
+  const total_actif = toNumber(actif.total_actif, 0) || (toNumber(actif.immobilisations, 0) + toNumber(actif.actif_circulant, 0) + tresorerie);
+
+  // Année courante = année des données les plus récentes
+  const detectedYear = Math.max(
+    toNumber(hist.n?.annee, 0),
+    toNumber(hist.n_moins_1?.annee, 0),
+    toNumber(hist.n_moins_2?.annee, 0)
+  );
+  const annee_n = detectedYear || toNumber(inputsData.annee_courante || inputsData.annee_n, 0) || new Date().getFullYear();
+
+  // ── Chaîne SYSCOHADA déterministe (AUCUNE estimation IA) ──
+  const achats_consommes = toNumber(cr.achats_matieres || cr.achats_consommes || cr.cout_ventes || cr.cogs, 0);
+  const services_exterieurs = toNumber(cr.charges_externes || cr.services_exterieurs, 0);
+  const impots_taxes = toNumber(cr.impots_taxes, 0);
+  const dotations_amortissements = toNumber(cr.dotations_amortissements || cr.amortissements, 0);
+  const charges_financieres = toNumber(cr.charges_financieres, 0);
+  const resultat_exploitation = toNumber(cr.resultat_exploitation, 0);
+
+  const chaine_comptable = {
+    ca: ca_n,
+    achats_consommes,
+    marge_brute: ca_n - achats_consommes,
+    valeur_ajoutee: (ca_n - achats_consommes) - services_exterieurs,
+    ebe: (ca_n - achats_consommes) - services_exterieurs - charges_personnel - impots_taxes,
+    resultat_exploitation: resultat_exploitation || ((ca_n - achats_consommes) - services_exterieurs - charges_personnel - impots_taxes - dotations_amortissements),
+    resultat_financier: -charges_financieres,
+    resultat_net: toNumber(cr.resultat_net, 0),
+    dotations_amortissements,
+    charges_financieres,
+    impots_taxes,
+    services_exterieurs,
+  };
+
+  return {
+    ca_n,
+    ca_n_minus_1,
+    ca_n_minus_2,
+    marge_brute: chaine_comptable.marge_brute,
+    marge_brute_pct: ca_n > 0 ? Math.round(chaine_comptable.marge_brute / ca_n * 1000) / 10 : 0,
+    ebitda: chaine_comptable.ebe,
+    ebitda_pct: ca_n > 0 ? Math.round(chaine_comptable.ebe / ca_n * 1000) / 10 : 0,
+    resultat_net: chaine_comptable.resultat_net,
+    tresorerie_nette,
+    endettement: dettes_financieres,
+    capitaux_propres,
+    total_actif,
+    charges_personnel,
+    annee_n,
+    chaine_comptable,
+  };
+}
+
+
+// ===== GENERIC HELPERS =====
+function pick(obj: any, ...keys: string[]): any {
+  for (const k of keys) {
+    if (obj?.[k] !== undefined) return obj[k];
+  }
+  return undefined;
+}
+
+function toArray(val: any): string[] {
+  if (!val) return [];
+  if (Array.isArray(val)) return val.map(v => typeof v === 'string' ? v : v?.item || v?.description || v?.name || JSON.stringify(v));
+  if (typeof val === 'string') return [val];
+  return [];
+}
+
+function toNumber(val: any, fallback = 0): number {
+  if (val == null) return fallback;
+  const n = typeof val === 'string' ? parseFloat(val.replace(/[^0-9.-]/g, '')) : Number(val);
+  return isNaN(n) ? fallback : n;
+}
+
+// ===== BMC NORMALIZER =====
+export function normalizeBmc(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+
+  // Normalize score
+  d.score_global = toNumber(pick(d, 'score_global', 'score', 'scoreGlobal', 'score_bmc'), 0);
+  d.score = d.score_global;
+
+  // Normalize maturity
+  d.maturite = pick(d, 'maturite', 'maturité', 'maturity', 'niveau_maturite') || 'Non évalué';
+
+  // Normalize canvas keys (handle flat arrays vs structured objects)
+  if (d.canvas) {
+    const c = d.canvas;
+    // partenaires_cles might be array or object
+    if (Array.isArray(c.partenaires_cles)) c.partenaires_cles = { items: c.partenaires_cles };
+    if (Array.isArray(c.activites_cles)) c.activites_cles = { items: c.activites_cles };
+    if (Array.isArray(c.ressources_cles)) c.ressources_cles = { items: c.ressources_cles };
+    if (Array.isArray(c.canaux)) c.canaux = { items: c.canaux };
+    if (Array.isArray(c.relations_clients)) c.relations_clients = { items: c.relations_clients };
+
+    // proposition_valeur might be string
+    if (typeof c.proposition_valeur === 'string') c.proposition_valeur = { enonce: c.proposition_valeur, avantages: [] };
+
+    // segments_clients might be array
+    if (Array.isArray(c.segments_clients)) c.segments_clients = { principal: c.segments_clients[0] || '', tous: c.segments_clients };
+
+    // structure_couts might be array of strings
+    if (Array.isArray(c.structure_couts)) c.structure_couts = { postes: c.structure_couts.map((s: any) => typeof s === 'string' ? { libelle: s } : s) };
+    // H4: Ensure structure_couts.postes[].montant is numeric, not string
+    if (c.structure_couts?.postes && Array.isArray(c.structure_couts.postes)) {
+      c.structure_couts.postes = c.structure_couts.postes.map((p: any) => ({
+        ...p,
+        montant: p.montant != null ? toNumber(p.montant, 0) : undefined,
+      }));
+    }
+
+    // flux_revenus might be array
+    if (Array.isArray(c.flux_revenus)) c.flux_revenus = { produit_principal: c.flux_revenus[0] || '' };
+  }
+
+  // Normalize SWOT key variants
+  if (d.swot) {
+    d.swot.forces = toArray(pick(d.swot, 'forces', 'strengths', 'points_forts'));
+    d.swot.faiblesses = toArray(pick(d.swot, 'faiblesses', 'weaknesses', 'points_faibles'));
+    d.swot.opportunites = toArray(pick(d.swot, 'opportunites', 'opportunités', 'opportunities'));
+    d.swot.menaces = toArray(pick(d.swot, 'menaces', 'threats'));
+  }
+
+  // Normalize recommandations (might be array instead of object)
+  if (Array.isArray(d.recommandations)) {
+    d.recommandations = { court_terme: d.recommandations[0] || '', moyen_terme: d.recommandations[1] || '', long_terme: d.recommandations[2] || '' };
+  }
+
+  return d;
+}
+
+// ===== SIC NORMALIZER =====
+export function normalizeSic(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+  d.score = toNumber(pick(d, 'score', 'score_global', 'score_sic'), 0);
+  d.score_global = d.score;
+
+  // Normalize ODD alignment
+  if (d.odd_alignment) {
+    d.odd_alignment = toArray(d.odd_alignment).length ? d.odd_alignment : 
+      (Array.isArray(d.odd_alignment) ? d.odd_alignment.map((o: any) => ({
+        odd_number: toNumber(pick(o, 'odd_number', 'numero', 'number', 'odd')),
+        odd_name: pick(o, 'odd_name', 'nom', 'name') || '',
+        contribution: pick(o, 'contribution', 'description') || '',
+        level: pick(o, 'level', 'niveau', 'force') || 'Moyen',
+      })) : []);
+  }
+
+  // Normalize théorie du changement keys
+  if (d.theorie_changement || d.theory_of_change) {
+    const tc = d.theorie_changement || d.theory_of_change;
+    d.theorie_changement = {
+      inputs: toArray(pick(tc, 'inputs', 'intrants', 'ressources')),
+      activites: toArray(pick(tc, 'activites', 'activités', 'activities')),
+      outputs: toArray(pick(tc, 'outputs', 'extrants', 'produits')),
+      outcomes: toArray(pick(tc, 'outcomes', 'résultats', 'resultats')),
+      impact: toArray(pick(tc, 'impact', 'impacts')),
+    };
+  }
+
+  return d;
+}
+
+// ===== INPUTS NORMALIZER =====
+export function normalizeInputs(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+  d.score = toNumber(pick(d, 'score', 'score_global'), 0);
+
+  // Normalize compte_resultat key variants
+  const cr = d.compte_resultat || d.income_statement || d.compte_de_resultat || {};
+  d.compte_resultat = {
+    chiffre_affaires: toNumber(pick(cr, 'chiffre_affaires', 'ca', 'revenue', 'chiffre_daffaires')),
+    achats_matieres: toNumber(pick(cr, 'achats_matieres', 'achats', 'cost_of_goods', 'achats_matières')),
+    charges_personnel: toNumber(pick(cr, 'charges_personnel', 'salaires', 'personnel', 'masse_salariale')),
+    charges_externes: toNumber(pick(cr, 'charges_externes', 'autres_charges', 'external_costs')),
+    dotations_amortissements: toNumber(pick(cr, 'dotations_amortissements', 'amortissements', 'depreciation')),
+    resultat_exploitation: toNumber(pick(cr, 'resultat_exploitation', 'ebit', 'resultat_dexploitation')),
+    charges_financieres: toNumber(pick(cr, 'charges_financieres', 'charges_financières', 'interest')),
+    resultat_net: toNumber(pick(cr, 'resultat_net', 'net_income', 'bénéfice_net')),
+  };
+
+  // Normalize bilan key variants
+  const rawBilan = d.bilan || d.balance_sheet || d.bilan_comptable || {};
+  const rawActif = rawBilan.actif || rawBilan.assets || rawBilan.asset || {};
+  const rawPassif = rawBilan.passif || rawBilan.liabilities || rawBilan.passifs || {};
+  const actif = {
+    immobilisations: toNumber(pick(rawActif, 'immobilisations', 'fixed_assets', 'immo')),
+    stocks: toNumber(pick(rawActif, 'stocks', 'inventories', 'inventory')),
+    creances_clients: toNumber(pick(rawActif, 'creances_clients', 'créances_clients', 'receivables', 'creances')),
+    tresorerie: toNumber(pick(rawActif, 'tresorerie', 'trésorerie', 'cash', 'disponibilites')),
+    total_actif: 0, // sera recalculé ci-dessous
+  };
+  const passif = {
+    capitaux_propres: toNumber(pick(rawPassif, 'capitaux_propres', 'equity', 'fonds_propres')),
+    dettes_lt: toNumber(pick(rawPassif, 'dettes_lt', 'long_term_debt', 'dettes_long_terme')),
+    dettes_ct: toNumber(pick(rawPassif, 'dettes_ct', 'short_term_debt', 'dettes_court_terme')),
+    fournisseurs: toNumber(pick(rawPassif, 'fournisseurs', 'payables', 'accounts_payable')),
+    total_passif: 0, // sera recalculé ci-dessous
+  };
+
+  // Recalculer les totaux depuis les sous-postes (ne PAS faire confiance aux totaux IA)
+  const sumActif = actif.immobilisations + actif.stocks + actif.creances_clients + actif.tresorerie;
+  const sumPassif = passif.capitaux_propres + passif.dettes_lt + passif.dettes_ct + passif.fournisseurs;
+
+  // Si les sous-postes sont tous à 0 mais l'IA a donné un total, utiliser le total IA comme fallback
+  const aiTotalActif = toNumber(pick(rawActif, 'total_actif', 'total_assets', 'total'));
+  const aiTotalPassif = toNumber(pick(rawPassif, 'total_passif', 'total_liabilities', 'total'));
+
+  actif.total_actif = sumActif > 0 ? sumActif : aiTotalActif;
+  passif.total_passif = sumPassif > 0 ? sumPassif : aiTotalPassif;
+
+  // Équilibrage : ajuster capitaux_propres (le poste d'équilibre naturel en comptabilité)
+  if (actif.total_actif > 0 && actif.total_actif !== passif.total_passif) {
+    const ecart = actif.total_actif - passif.total_passif;
+    console.warn(`[normalizeInputs] Bilan déséquilibré: Actif=${actif.total_actif}, Passif=${passif.total_passif} (écart ${ecart}). Ajustement via capitaux_propres.`);
+    passif.capitaux_propres += ecart;
+    passif.total_passif = actif.total_actif;
+  }
+
+  d.bilan = { actif, passif };
+
+  // Normalize effectifs
+  const rawEff = d.effectifs || d.employees || d.staff || {};
+  d.effectifs = {
+    total: toNumber(pick(rawEff, 'total', 'count', 'nombre')),
+    cadres: toNumber(pick(rawEff, 'cadres', 'managers', 'management')),
+    employes: toNumber(pick(rawEff, 'employes', 'employés', 'workers', 'ouvriers')),
+  };
+
+  // ── Normalize informations_generales (passthrough, preserve if present) ──
+  if (d.informations_generales && typeof d.informations_generales === 'object') {
+    // Just preserve as-is, no transformation needed
+  }
+
+  // ── Normalize historique_3ans ──
+  if (d.historique_3ans && typeof d.historique_3ans === 'object') {
+    for (const key of ['n_moins_2', 'n_moins_1', 'n']) {
+      const yr = d.historique_3ans[key];
+      if (yr && typeof yr === 'object') {
+        yr.ca_total = toNumber(pick(yr, 'ca_total', 'chiffre_affaires', 'ca'), 0);
+        yr.couts_variables = toNumber(pick(yr, 'couts_variables', 'charges_variables'), 0);
+        yr.charges_fixes = toNumber(pick(yr, 'charges_fixes', 'couts_fixes'), 0);
+        yr.resultat_exploitation = toNumber(pick(yr, 'resultat_exploitation', 'ebit'), 0);
+        yr.resultat_net = toNumber(pick(yr, 'resultat_net', 'net_income'), 0);
+        yr.nombre_clients = toNumber(pick(yr, 'nombre_clients', 'clients'), 0);
+        yr.nombre_employes = toNumber(pick(yr, 'nombre_employes', 'employes', 'effectif'), 0);
+        yr.tresorerie = toNumber(pick(yr, 'tresorerie', 'trésorerie', 'cash'), 0);
+        // Preserve ca_par_produit array as-is if present
+      }
+    }
+  }
+
+  // ── Normalize equipe ──
+  if (d.equipe && Array.isArray(d.equipe)) {
+    d.equipe = d.equipe.map((e: any) => ({
+      poste: e.poste || e.titre || e.role || 'Non spécifié',
+      nombre: toNumber(pick(e, 'nombre', 'effectif', 'count'), 0),
+      salaire_mensuel: toNumber(pick(e, 'salaire_mensuel', 'salaire', 'salary'), 0),
+      charges_sociales_pct: toNumber(pick(e, 'charges_sociales_pct', 'charges_sociales', 'social_rate'), 0),
+    }));
+  }
+
+  // ── Normalize couts_variables ──
+  if (d.couts_variables && Array.isArray(d.couts_variables)) {
+    d.couts_variables = d.couts_variables.map((c: any) => ({
+      poste: c.poste || c.libelle || c.label || 'Non spécifié',
+      montant_mensuel: toNumber(pick(c, 'montant_mensuel', 'mensuel'), 0),
+      montant_annuel: toNumber(pick(c, 'montant_annuel', 'montant_annuel_an1', 'annuel'), 0),
+    }));
+  }
+
+  // ── Normalize couts_fixes ──
+  if (d.couts_fixes && Array.isArray(d.couts_fixes)) {
+    d.couts_fixes = d.couts_fixes.map((c: any) => ({
+      poste: c.poste || c.libelle || c.label || 'Non spécifié',
+      montant_mensuel: toNumber(pick(c, 'montant_mensuel', 'mensuel'), 0),
+      montant_annuel: toNumber(pick(c, 'montant_annuel', 'montant_annuel_an1', 'annuel'), 0),
+    }));
+  }
+
+  // ── Normalize bfr ──
+  if (d.bfr && typeof d.bfr === 'object') {
+    d.bfr = {
+      delai_clients_jours: toNumber(pick(d.bfr, 'delai_clients_jours', 'dso', 'delai_clients'), 0),
+      delai_fournisseurs_jours: toNumber(pick(d.bfr, 'delai_fournisseurs_jours', 'dpo', 'delai_fournisseurs'), 0),
+      stock_moyen_jours: toNumber(pick(d.bfr, 'stock_moyen_jours', 'dio', 'stock_jours', 'rotation_stock'), 0),
+      tresorerie_depart: toNumber(pick(d.bfr, 'tresorerie_depart', 'tresorerie_initiale', 'cash_depart'), 0),
+    };
+  }
+
+  // ── Normalize investissements ──
+  if (d.investissements && Array.isArray(d.investissements)) {
+    d.investissements = d.investissements.map((inv: any) => ({
+      nature: inv.nature || inv.type || inv.libelle || 'Non spécifié',
+      montant: toNumber(pick(inv, 'montant', 'amount', 'valeur'), 0),
+      annee_achat: toNumber(pick(inv, 'annee_achat', 'annee', 'year'), 0),
+      duree_amortissement_ans: toNumber(pick(inv, 'duree_amortissement_ans', 'duree_amortissement', 'amortissement'), 0),
+    }));
+  }
+
+  // ── Normalize financement ──
+  if (d.financement && typeof d.financement === 'object') {
+    d.financement.apports_capital = toNumber(pick(d.financement, 'apports_capital', 'capital', 'apports'), 0);
+    d.financement.subventions = toNumber(pick(d.financement, 'subventions', 'grants', 'subvention'), 0);
+    if (d.financement.prets && Array.isArray(d.financement.prets)) {
+      d.financement.prets = d.financement.prets.map((p: any) => ({
+        source: p.source || p.banque || p.preteur || 'Non spécifié',
+        montant: toNumber(pick(p, 'montant', 'amount'), 0),
+        taux_pct: toNumber(pick(p, 'taux_pct', 'taux', 'rate'), 0),
+        duree_mois: toNumber(pick(p, 'duree_mois', 'duree', 'term'), 0),
+        differe_mois: toNumber(pick(p, 'differe_mois', 'differe', 'grace_period'), 0),
+      }));
+    }
+  }
+
+  // ── Normalize hypotheses_croissance ──
+  if (d.hypotheses_croissance && typeof d.hypotheses_croissance === 'object') {
+    const hc = d.hypotheses_croissance;
+    hc.taux_marge_brute_cible = toNumber(pick(hc, 'taux_marge_brute_cible', 'marge_brute_cible'), 0);
+    hc.taux_marge_operationnelle_cible = toNumber(pick(hc, 'taux_marge_operationnelle_cible', 'marge_op_cible'), 0);
+    hc.inflation_annuelle = toNumber(pick(hc, 'inflation_annuelle', 'inflation'), 0);
+    hc.augmentation_prix_annuelle = toNumber(pick(hc, 'augmentation_prix_annuelle', 'hausse_prix'), 0);
+    hc.croissance_volumes_annuelle = toNumber(pick(hc, 'croissance_volumes_annuelle', 'croissance_volumes'), 0);
+    hc.taux_is = toNumber(pick(hc, 'taux_is', 'impot_societes'), 0);
+    // Preserve objectifs_ca array as-is
+  }
+
+  return d;
+}
+
+// ===== FRAMEWORK NORMALIZER =====
+export function normalizeFramework(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+  d.score = toNumber(pick(d, 'score', 'score_global'), 0);
+  d.points_forts = toArray(pick(d, 'points_forts', 'forces', 'strengths'));
+  d.points_faibles = toArray(pick(d, 'points_faibles', 'faiblesses', 'weaknesses'));
+  d.recommandations = toArray(pick(d, 'recommandations', 'recommendations'));
+
+  // Ensure ratios_historiques is always an array
+  if (d.ratios_historiques && !Array.isArray(d.ratios_historiques)) {
+    d.ratios_historiques = [];
+  }
+
+  // Normalize projection_5ans.lignes — ensure all 8 lines exist
+  if (d.projection_5ans?.lignes && Array.isArray(d.projection_5ans.lignes)) {
+    d.projection_5ans.lignes = d.projection_5ans.lignes.map((l: any) => {
+      const result = { ...l };
+      // Ensure numeric values for an1-an5
+      for (const yr of ['an1', 'an2', 'an3', 'an4', 'an5']) {
+        if (result[yr] != null && typeof result[yr] === 'string') {
+          const cleaned = result[yr].replace(/[%\s,]/g, '');
+          const num = parseFloat(cleaned);
+          if (!isNaN(num) && !result[yr].includes('%')) result[yr] = num;
+        }
+      }
+      return result;
+    });
+  }
+
+  // ── M6: Ensure projection_5ans.lignes has exactly 8 required lines ──
+  const REQUIRED_LIGNES = [
+    "CA Total",
+    "Marge Brute",
+    "Marge Brute %",
+    "EBITDA",
+    "Marge EBITDA %",
+    "Résultat Net",
+    "Cash-Flow Net",
+    "Trésorerie Cumulée",
+  ];
+  if (d.projection_5ans) {
+    if (!Array.isArray(d.projection_5ans.lignes)) d.projection_5ans.lignes = [];
+    const existingLabels = d.projection_5ans.lignes.map((l: any) =>
+      (l.poste || l.libelle || '').toLowerCase()
+    );
+    for (const req of REQUIRED_LIGNES) {
+      const reqLow = req.toLowerCase();
+      const exists = existingLabels.some((lb: string) => lb.includes(reqLow.split(' ')[0]) && (reqLow.length < 5 || lb.includes(reqLow.substring(0, 5))));
+      if (!exists) {
+        d.projection_5ans.lignes.push({ poste: req, an1: 0, an2: 0, an3: 0, an4: 0, an5: 0 });
+        console.warn(`[normalizeFramework] Missing required ligne "${req}" — added with zeros`);
+      }
+    }
+  }
+
+  // ── H7: Replace <montant> placeholders in scenarios.sensibilite ──
+  if (d.scenarios?.sensibilite && Array.isArray(d.scenarios.sensibilite)) {
+    const hasPlaceholder = d.scenarios.sensibilite.some((s: any) => typeof s === 'string' && s.includes('<montant>'));
+    if (hasPlaceholder && d.projection_5ans?.lignes) {
+      const lignes = d.projection_5ans.lignes;
+      const findVal = (...keywords: string[]): number => {
+        const l = lignes.find((ln: any) => {
+          const lb = (ln.poste || ln.libelle || '').toLowerCase();
+          return keywords.every(k => lb.includes(k.toLowerCase()));
+        });
+        return l ? (toNumber(l.an1, 0)) : 0;
+      };
+      const caAn1 = findVal('CA') || findVal('chiffre');
+      const margeAn1 = findVal('marge brute');
+      const ebitdaAn1 = findVal('ebitda');
+      const margePct = caAn1 > 0 ? margeAn1 / caAn1 : 0.3;
+      const fixedCosts = Math.max(margeAn1 - ebitdaAn1, 0);
+      const fmt = (n: number) => {
+        const abs = Math.abs(Math.round(n));
+        const sign = n >= 0 ? '+' : '-';
+        if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M FCFA`;
+        if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(0)}K FCFA`;
+        return `${sign}${abs} FCFA`;
+      };
+      d.scenarios.sensibilite = d.scenarios.sensibilite.map((s: any) => {
+        if (typeof s !== 'string' || !s.includes('<montant>')) return s;
+        let replaced = s;
+        if (s.startsWith('CA +10%')) {
+          const delta = caAn1 * 0.10 * margePct;
+          replaced = `CA +10% : EBITDA: ${fmt(delta)}`;
+        } else if (s.startsWith('Marge brute -10%')) {
+          const delta = -(margeAn1 * 0.10);
+          replaced = `Marge brute -10% : EBITDA: ${fmt(delta)}`;
+        } else if (s.startsWith('Charges fixes +10%')) {
+          const delta = fixedCosts > 0 ? -(fixedCosts * 0.10) : -(ebitdaAn1 * 0.05);
+          replaced = `Charges fixes +10% : EBITDA: ${fmt(delta)}`;
+        } else {
+          // Fallback: remove placeholder with N/A
+          replaced = s.replace(/<montant>/g, 'N/C');
+        }
+        return replaced;
+      });
+    }
+  }
+
+  // Normalize scenarios.tableau items
+  if (d.scenarios?.tableau && Array.isArray(d.scenarios.tableau)) {
+    d.scenarios.tableau = d.scenarios.tableau.map((t: any) => ({ ...t }));
+  }
+
+  // Normalize analyse_marge.activites
+  if (d.analyse_marge?.activites && Array.isArray(d.analyse_marge.activites)) {
+    d.analyse_marge.activites = d.analyse_marge.activites.map((a: any) => ({
+      ...a,
+      ca: a.ca != null ? toNumber(a.ca) : 0,
+      marge_brute: a.marge_brute != null ? toNumber(a.marge_brute) : 0,
+    }));
+  }
+
+  // Normalize tresorerie_bfr
+  if (d.tresorerie_bfr) {
+    const bfr = d.tresorerie_bfr;
+    bfr.tresorerie_nette = bfr.tresorerie_nette != null ? toNumber(bfr.tresorerie_nette) : undefined;
+    bfr.cashflow_operationnel = bfr.cashflow_operationnel != null ? toNumber(bfr.cashflow_operationnel) : undefined;
+    bfr.caf = bfr.caf != null ? toNumber(bfr.caf) : undefined;
+  }
+
+  // Normalize kpis
+  if (d.kpis) {
+    d.kpis.ca_annee_n = d.kpis.ca_annee_n != null ? toNumber(d.kpis.ca_annee_n) : undefined;
+    d.kpis.ebitda = d.kpis.ebitda != null ? toNumber(d.kpis.ebitda) : undefined;
+  }
+
+  return d;
+}
+
+// ===== DIAGNOSTIC NORMALIZER =====
+export function normalizeDiagnostic(raw: any): any {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      metadata: { version: 1, donnees_completes: false },
+      score_global: 0, score: 0,
+      palier: "en_construction", label: "En construction", couleur: "🟠",
+      resume_executif: "",
+      scores_dimensions: {},
+      forces: [], opportunites_amelioration: [], points_vigilance: [],
+      incoherences: [], recommandations: [], benchmarks: {},
+      avis_par_livrable: {},
+      synthese_globale: { avis_ensemble: "", points_cles_a_retenir: [], demarche_recommandee: [], prochaines_etapes: [] },
+      points_attention_prioritaires: [],
+    };
+  }
+
+  const d = { ...raw };
+
+  // Score — fallback to verdict_readiness.score if root score is 0
+  const rootScore = toNumber(pick(d, 'score_global', 'score', 'score_investment_readiness'), 0);
+  const verdictScore = toNumber(d.verdict_readiness?.score, 0);
+  d.score_global = rootScore > 0 ? rootScore : verdictScore;
+  d.score = d.score_global;
+
+  // Palier: only auto-calculate if AI didn't provide one
+  const s = d.score_global;
+  const palierMap: Record<string, { label: string; couleur: string }> = {
+    "en_construction": { label: "En construction", couleur: "🟠" },
+    "a_renforcer":     { label: "À renforcer",     couleur: "🟡" },
+    "potentiel":       { label: "Potentiel",       couleur: "🟢" },
+    "bien_avance":     { label: "Bien avancé",     couleur: "💚" },
+    "excellent":       { label: "Excellent",       couleur: "✅" },
+  };
+  if (!d.palier || d.palier === '') {
+    // Derive palier from score
+    if (s <= 30)      d.palier = "en_construction";
+    else if (s <= 50) d.palier = "a_renforcer";
+    else if (s <= 70) d.palier = "potentiel";
+    else if (s <= 85) d.palier = "bien_avance";
+    else              d.palier = "excellent";
+  }
+  // Always ensure label & couleur match the palier (whether AI-provided or derived)
+  const palierInfo = palierMap[d.palier];
+  if (palierInfo) {
+    d.label = d.label || palierInfo.label;
+    d.couleur = d.couleur || palierInfo.couleur;
+  }
+
+  // Resume exécutif (plusieurs clés possibles)
+  d.resume_executif = pick(d, 'resume_executif', 'synthese_executive', 'synthèse_exécutive', 'synthese', 'executive_summary') || '';
+
+  // Dimensions — préserver les objets complexes
+  d.scores_dimensions = d.scores_dimensions || {};
+  const dimDefaults: Record<string, { label: string; poids: number }> = {
+    coherence:             { label: "Cohérence entre livrables", poids: 25 },
+    viabilite:             { label: "Viabilité économique",       poids: 25 },
+    realisme:              { label: "Réalisme des projections",   poids: 20 },
+    completude_couts:      { label: "Complétude des coûts",       poids: 15 },
+    capacite_remboursement:{ label: "Capacité de remboursement",  poids: 15 },
+  };
+  for (const [dim, defaults] of Object.entries(dimDefaults)) {
+    if (!d.scores_dimensions[dim]) {
+      d.scores_dimensions[dim] = { score: 0, ...defaults, commentaire: "", analyse_detaillee: "" };
+    } else {
+      d.scores_dimensions[dim] = { ...defaults, ...d.scores_dimensions[dim] };
+    }
+  }
+
+  // Listes — garder les objets (pas toArray qui stringify)
+  const toObjArray = (v: any): any[] => Array.isArray(v) ? v : (v ? [v] : []);
+  d.forces = toObjArray(d.forces || d.swot?.forces || []);
+  d.opportunites_amelioration = toObjArray(d.opportunites_amelioration || d.swot?.faiblesses || []);
+  d.points_vigilance = toObjArray(d.points_vigilance || d.risques_critiques || []);
+  d.incoherences = toObjArray(d.incoherences || []);
+  d.recommandations = toObjArray(d.recommandations || d.plan_action_prioritaire || []);
+  d.points_attention_prioritaires = toObjArray(d.points_attention_prioritaires || []);
+
+  // Benchmarks
+  d.benchmarks = d.benchmarks || {};
+
+  // Avis par livrable
+  d.avis_par_livrable = d.avis_par_livrable || {};
+
+  // Synthèse globale
+  d.synthese_globale = d.synthese_globale || {
+    avis_ensemble: "", points_cles_a_retenir: [], demarche_recommandee: [], prochaines_etapes: []
+  };
+
+  // Métadonnées
+  d.metadata = d.metadata || { version: 1, donnees_completes: false };
+
+  // Compatibilité avec l'ancien format (swot, diagnostic_par_dimension)
+  if (d.swot) {
+    for (const k of ['forces', 'faiblesses', 'opportunites', 'menaces']) {
+      if (d.swot[k]) {
+        d.swot[k] = d.swot[k].map((s_item: any) =>
+          typeof s_item === 'string' ? s_item : s_item?.item || s_item?.titre || s_item?.description || JSON.stringify(s_item)
+        );
+      }
+    }
+  }
+
+  return d;
+}
+
+// ===== BUSINESS PLAN NORMALIZER =====
+export function normalizeBusinessPlan(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+  d.score = toNumber(pick(d, 'score', 'score_global'), 0);
+
+  // Normalize resume_executif variants
+  d.resume_executif = d.resume_executif || d.résumé_exécutif || d.executive_summary || {};
+
+  return d;
+}
+
+// ===== ODD NORMALIZER =====
+export function normalizeOdd(raw: unknown): Record<string, unknown> {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+
+  const evalCibles = r.evaluation_cibles_odd as Record<string, unknown> | undefined;
+  const cibles = Array.isArray(evalCibles?.cibles) ? evalCibles!.cibles : [];
+  const resumeParOdd = (evalCibles?.resume_par_odd && typeof evalCibles.resume_par_odd === "object")
+    ? evalCibles.resume_par_odd
+    : {};
+
+  const indImpact = r.indicateurs_impact as Record<string, unknown> | undefined;
+  const indicateurs = Array.isArray(indImpact?.indicateurs) ? indImpact!.indicateurs : [];
+
+  const circularite = r.circularite as Record<string, unknown> | undefined;
+  const synthese = r.synthese as Record<string, unknown> | undefined;
+  const metadata = r.metadata as Record<string, unknown> | undefined;
+
+  return {
+    metadata: {
+      nom_entreprise: metadata?.nom_entreprise ?? "",
+      pays: metadata?.pays ?? "",
+      secteur: metadata?.secteur ?? "",
+      date_generation: metadata?.date_generation ?? new Date().toISOString().split("T")[0],
+      version: metadata?.version ?? 1,
+      livrables_utilises: Array.isArray(metadata?.livrables_utilises)
+        ? metadata!.livrables_utilises
+        : ["bmc", "sic"],
+      total_cibles_evaluees: cibles.length,
+    },
+    informations_projet: r.informations_projet ?? {},
+    evaluation_cibles_odd: {
+      cibles,
+      resume_par_odd: resumeParOdd,
+    },
+    indicateurs_impact: { indicateurs },
+    circularite: {
+      evaluation: circularite?.evaluation ?? "",
+      pratiques: Array.isArray(circularite?.pratiques) ? circularite!.pratiques : [],
+      cibles_odd_liees: Array.isArray(circularite?.cibles_odd_liees) ? circularite!.cibles_odd_liees : [],
+    },
+    synthese: {
+      odd_prioritaires: Array.isArray(synthese?.odd_prioritaires) ? synthese!.odd_prioritaires : [],
+      contribution_globale: synthese?.contribution_globale ?? "",
+      recommandations: Array.isArray(synthese?.recommandations) ? synthese!.recommandations : [],
+    },
+    score: (() => {
+      const oddEntries = Object.values(resumeParOdd as Record<string, any>);
+      if (!oddEntries.length) return 0;
+      const scores = oddEntries.map((o: any) => typeof o?.score === 'number' ? o.score : 0);
+      return Math.round(scores.reduce((a: number, b: number) => a + b, 0) / scores.length);
+    })(),
+    score_global: (() => {
+      const oddEntries = Object.values(resumeParOdd as Record<string, any>);
+      if (!oddEntries.length) return 0;
+      const scores = oddEntries.map((o: any) => typeof o?.score === 'number' ? o.score : 0);
+      return Math.round(scores.reduce((a: number, b: number) => a + b, 0) / scores.length);
+    })(),
+  };
+}
+
+// ===== PLAN OVO NORMALIZER =====
+export function normalizePlanOvo(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+  const YEAR_KEYS = ['year_minus_2', 'year_minus_1', 'current_year', 'year2', 'year3', 'year4', 'year5', 'year6'];
+
+  d.score = toNumber(pick(d, 'score', 'score_global'), 0);
+
+  // C6: Use base_year from data (frozen at enterprise creation) — never override with current date
+  // base_year is set by the AI using the enterprise's creation year, not the regeneration date
+  const cy: number = d.base_year || d.years?.current_year || new Date().getFullYear();
+  if (!d.years) {
+    d.base_year = cy;
+    d.years = {
+      year_minus_2: cy - 2,
+      year_minus_1: cy - 1,
+      current_year: cy,
+      year2: cy + 1,
+      year3: cy + 2,
+      year4: cy + 3,
+      year5: cy + 4,
+      year6: cy + 5,
+    };
+  }
+
+  // Ensure all year-series objects have all 8 keys
+  const seriesFields = ['revenue', 'cogs', 'gross_profit', 'gross_margin_pct', 'ebitda', 'ebitda_margin_pct', 'net_profit', 'cashflow'];
+  for (const field of seriesFields) {
+    if (!d[field]) d[field] = {};
+    for (const yk of YEAR_KEYS) {
+      d[field][yk] = toNumber(d[field][yk], 0);
+    }
+  }
+
+  // Ensure opex sub-categories have all 8 keys
+  if (d.opex) {
+    const opexFields = ['staff_salaries', 'marketing', 'office_costs', 'travel', 'insurance', 'maintenance', 'third_parties', 'other'];
+    for (const field of opexFields) {
+      if (!d.opex[field]) d.opex[field] = {};
+      for (const yk of YEAR_KEYS) {
+        d.opex[field][yk] = toNumber(d.opex[field][yk], 0);
+      }
+    }
+  }
+
+  // Recalculate gross_profit = revenue - cogs for consistency
+  for (const yk of YEAR_KEYS) {
+    const rev = d.revenue[yk];
+    const cogs = d.cogs[yk];
+    d.gross_profit[yk] = rev - cogs;
+    d.gross_margin_pct[yk] = rev > 0 ? ((rev - cogs) / rev) * 100 : 0;
+  }
+
+  // Recalculate ebitda_margin_pct
+  for (const yk of YEAR_KEYS) {
+    const rev = d.revenue[yk];
+    d.ebitda_margin_pct[yk] = rev > 0 ? (d.ebitda[yk] / rev) * 100 : 0;
+  }
+
+  // Normalize recommandations
+  d.recommandations = toArray(pick(d, 'recommandations', 'recommendations'));
+  d.key_assumptions = toArray(pick(d, 'key_assumptions', 'hypotheses_cles'));
+
+  // Guard: DSCR and Multiple EBITDA are meaningless when first projection year EBITDA is negative
+  if (d.investment_metrics && (d.ebitda?.year2 || 0) <= 0) {
+    d.investment_metrics.dscr = null;
+    d.investment_metrics.multiple_ebitda = null;
+  }
+
+  return d;
+}
+
+// ===== ENFORCE FRAMEWORK CONSTRAINTS ON PLAN OVO =====
+/**
+ * Overwrites Plan OVO projection years (year2-year6) with exact Framework values
+ * and recalculates all derived fields deterministically.
+ */
+export function enforceFrameworkConstraints(data: any, frameworkData: any, inputsData?: any, country?: string): any {
+  if (!data || !frameworkData?.projection_5ans?.lignes) return data;
+
+  // ── Anchor current_year on real Inputs data (not AI-hallucinated) ──
+  if (inputsData?.compte_resultat) {
+    const cr = inputsData.compte_resultat;
+    if (cr.chiffre_affaires && cr.chiffre_affaires > 0) {
+      data.revenue.current_year = toNumber(cr.chiffre_affaires);
+    }
+    if (cr.resultat_net && cr.resultat_net !== 0) {
+      data.net_profit.current_year = toNumber(cr.resultat_net);
+    }
+    // Derive EBITDA from inputs if available
+    const ebitdaFromInputs = toNumber(cr.resultat_exploitation) + toNumber(cr.dotations_amortissements);
+    if (ebitdaFromInputs > 0) {
+      data.ebitda.current_year = ebitdaFromInputs;
+    }
+    // Recalculate gross_profit & cogs for current_year
+    if (cr.chiffre_affaires > 0 && cr.achats_matieres !== undefined) {
+      data.cogs.current_year = toNumber(cr.achats_matieres);
+      data.gross_profit.current_year = toNumber(cr.chiffre_affaires) - toNumber(cr.achats_matieres);
+      data.gross_margin_pct.current_year = data.revenue.current_year > 0
+        ? (data.gross_profit.current_year / data.revenue.current_year) * 100 : 0;
+    }
+    if (data.revenue.current_year > 0) {
+      data.ebitda_margin_pct.current_year = (data.ebitda.current_year / data.revenue.current_year) * 100;
+    }
+  }
+
+  // ── Anchor year_minus on REAL historical data (not back-derived) ──
+  const truth = getFinancialTruth(inputsData);
+  if (truth && truth.ca_n > 0) {
+    const series: string[] = ['revenue', 'gross_profit', 'ebitda', 'net_profit', 'cogs', 'cashflow'];
+
+    for (const seriesKey of series) {
+      const s = data[seriesKey];
+      if (!s || typeof s !== 'object') continue;
+
+      if (seriesKey === 'revenue') {
+        if (truth.ca_n_minus_1 > 0) s.year_minus_1 = truth.ca_n_minus_1;
+        if (truth.ca_n_minus_2 > 0) s.year_minus_2 = truth.ca_n_minus_2;
+        s.current_year = truth.ca_n;
+      } else if (seriesKey === 'gross_profit' && truth.ca_n > 0) {
+        const mbPct = s.current_year / truth.ca_n;
+        if (truth.ca_n_minus_1 > 0 && (!s.year_minus_1 || s.year_minus_1 <= 0)) s.year_minus_1 = Math.round(truth.ca_n_minus_1 * mbPct);
+        if (truth.ca_n_minus_2 > 0 && (!s.year_minus_2 || s.year_minus_2 <= 0)) s.year_minus_2 = Math.round(truth.ca_n_minus_2 * mbPct);
+      } else if (seriesKey === 'ebitda' && truth.ca_n > 0) {
+        const ebitdaPct = s.current_year / truth.ca_n;
+        if (truth.ca_n_minus_1 > 0 && (!s.year_minus_1 || s.year_minus_1 <= 0)) s.year_minus_1 = Math.round(truth.ca_n_minus_1 * ebitdaPct);
+        if (truth.ca_n_minus_2 > 0 && (!s.year_minus_2 || s.year_minus_2 <= 0)) s.year_minus_2 = Math.round(truth.ca_n_minus_2 * ebitdaPct);
+      } else if (seriesKey === 'cogs' && truth.ca_n > 0) {
+        const cogsPct = s.current_year / truth.ca_n;
+        if (truth.ca_n_minus_1 > 0 && (!s.year_minus_1 || s.year_minus_1 <= 0)) s.year_minus_1 = Math.round(truth.ca_n_minus_1 * cogsPct);
+        if (truth.ca_n_minus_2 > 0 && (!s.year_minus_2 || s.year_minus_2 <= 0)) s.year_minus_2 = Math.round(truth.ca_n_minus_2 * cogsPct);
+      } else if (seriesKey === 'net_profit' && truth.ca_n > 0) {
+        const rnPct = s.current_year / truth.ca_n;
+        if (truth.ca_n_minus_1 > 0 && (!s.year_minus_1 || s.year_minus_1 <= 0)) s.year_minus_1 = Math.round(truth.ca_n_minus_1 * rnPct);
+        if (truth.ca_n_minus_2 > 0 && (!s.year_minus_2 || s.year_minus_2 <= 0)) s.year_minus_2 = Math.round(truth.ca_n_minus_2 * rnPct);
+      } else if (seriesKey === 'cashflow' && truth.ca_n > 0) {
+        const cfPct = s.current_year / truth.ca_n;
+        if (truth.ca_n_minus_1 > 0 && (!s.year_minus_1 || s.year_minus_1 <= 0)) s.year_minus_1 = Math.round(truth.ca_n_minus_1 * cfPct);
+        if (truth.ca_n_minus_2 > 0 && (!s.year_minus_2 || s.year_minus_2 <= 0)) s.year_minus_2 = Math.round(truth.ca_n_minus_2 * cfPct);
+      }
+    }
+
+    // Also fix base_year / years mapping based on truth
+    const cy = truth.annee_n;
+    if (cy > 2000 && cy < 2100) {
+      data.base_year = cy;
+      data.years = {
+        year_minus_2: cy - 2,
+        year_minus_1: cy - 1,
+        current_year: cy,
+        year2: cy + 1,
+        year3: cy + 2,
+        year4: cy + 3,
+        year5: cy + 4,
+        year6: cy + 5,
+      };
+    }
+  }
+
+  const lignes = frameworkData.projection_5ans.lignes;
+  if (!Array.isArray(lignes) || lignes.length === 0) return data;
+
+  const PROJ_KEYS = ['year2', 'year3', 'year4', 'year5', 'year6'];
+  const AN_KEYS = ['an1', 'an2', 'an3', 'an4', 'an5'];
+
+  // Helper: find a ligne by label patterns
+  // Helper: find a ligne by label patterns, optionally excluding patterns containing certain strings
+  const findLigne = (excludePatterns: string[] = [], ...patterns: string[]) => {
+    return lignes.find((l: any) => {
+      const lb = (l.poste || l.libelle || '').toLowerCase();
+      if (excludePatterns.some(ex => lb.includes(ex))) return false;
+      return patterns.some(p => lb.includes(p));
+    });
+  };
+
+  const caLine = findLigne([], 'ca total', 'chiffre', 'revenue', 'ca ', 'total revenus', 'ventes totales', 'recettes', 'turnover', 'ventes');
+  // Exclude lines containing '%' to avoid confusing amounts with percentages
+  const mbLine = findLigne(['%', '(%)'], 'marge brute', 'gross');
+  const ebitdaLine = findLigne(['%', '(%)'], 'ebitda');
+  const rnLine = findLigne([], 'résultat net', 'resultat net', 'net profit');
+  const cfLine = findLigne([], 'cash', 'trésorerie', 'tresorerie');
+
+  // Overwrite each projection year with framework values
+  const overwrite = (series: any, ligne: any) => {
+    if (!ligne || !series) return;
+    for (let i = 0; i < 5; i++) {
+      const val = toNumber(ligne[AN_KEYS[i]], NaN);
+      if (!isNaN(val)) {
+        series[PROJ_KEYS[i]] = val;
+      }
+    }
+  };
+
+  overwrite(data.revenue, caLine);
+  overwrite(data.gross_profit, mbLine);
+  overwrite(data.ebitda, ebitdaLine);
+  overwrite(data.net_profit, rnLine);
+  overwrite(data.cashflow, cfLine);
+
+  // Guard: if framework revenue > 3× real inputs CA, rescale all projection years proportionally
+  if (inputsData?.compte_resultat?.chiffre_affaires > 0 && data.revenue.current_year > 0) {
+    const inputsCA = data.revenue.current_year;
+    const fwYear2Rev = data.revenue[PROJ_KEYS[0]] || 0;
+    if (inputsCA > 0 && fwYear2Rev > inputsCA * 3) {
+      const rescaleRatio = (inputsCA * 1.15) / fwYear2Rev;
+      console.warn(`[enforceFramework] Revenue rescale: fw_year2=${fwYear2Rev} vs inputs_ca=${inputsCA} (ratio=${(fwYear2Rev / inputsCA).toFixed(1)}×) — rescaling by ${rescaleRatio.toFixed(3)}`);
+      const projSeries = ['revenue', 'gross_profit', 'ebitda', 'net_profit', 'cogs', 'cashflow'];
+      for (const s of projSeries) {
+        if (data[s]) {
+          for (const yk of PROJ_KEYS) {
+            if (data[s][yk]) data[s][yk] = Math.round(data[s][yk] * rescaleRatio);
+          }
+        }
+      }
+    }
+  }
+
+  // Guard: Résultat Net cannot exceed EBITDA (RN = EBITDA - Amort - Interest - Tax)
+  for (const yk of PROJ_KEYS) {
+    if (data.ebitda[yk] !== undefined && data.net_profit[yk] !== undefined) {
+      if (data.net_profit[yk] > data.ebitda[yk]) {
+        console.warn(`[enforceFramework] net_profit[${yk}]=${data.net_profit[yk]} > ebitda[${yk}]=${data.ebitda[yk]} — capping to EBITDA`);
+        data.net_profit[yk] = data.ebitda[yk];
+      }
+    }
+  }
+
+  // ── SECTOR GUARDRAILS — clamp AI projections to realistic bounds ──
+  try {
+    const guardrails = getSectorGuardrails(inputsData?.informations_generales?.secteur || "services_b2b");
+
+    for (let i = 1; i < PROJ_KEYS.length; i++) {
+      const prev = data.revenue[PROJ_KEYS[i - 1]];
+      const curr = data.revenue[PROJ_KEYS[i]];
+      if (prev > 0 && curr > 0) {
+        const growth = (curr / prev - 1) * 100;
+        if (growth > guardrails.croissance_max_annuelle) {
+          console.warn(`[guardrail] Croissance ${PROJ_KEYS[i]} = ${growth.toFixed(0)}% > max ${guardrails.croissance_max_annuelle}% — capping`);
+          data.revenue[PROJ_KEYS[i]] = Math.round(prev * (1 + guardrails.croissance_max_annuelle / 100));
+          // Recalculate derived series proportionally
+          const ratio = data.revenue[PROJ_KEYS[i]] / curr;
+          data.gross_profit[PROJ_KEYS[i]] = Math.round(data.gross_profit[PROJ_KEYS[i]] * ratio);
+          data.cogs[PROJ_KEYS[i]] = data.revenue[PROJ_KEYS[i]] - data.gross_profit[PROJ_KEYS[i]];
+          data.ebitda[PROJ_KEYS[i]] = Math.round(data.ebitda[PROJ_KEYS[i]] * ratio);
+          data.net_profit[PROJ_KEYS[i]] = Math.round(data.net_profit[PROJ_KEYS[i]] * ratio);
+          data.cashflow[PROJ_KEYS[i]] = Math.round(data.cashflow[PROJ_KEYS[i]] * ratio);
+        }
+      }
+    }
+
+    // Check gross margin bounds for projection years (only warn if data is AI-estimated, not from financial statements)
+    for (const yk of PROJ_KEYS) {
+      const rev = data.revenue[yk];
+      const gp = data.gross_profit[yk];
+      if (rev > 0 && gp > 0) {
+        const mbPct = (gp / rev) * 100;
+        if (mbPct < guardrails.marge_brute_min || mbPct > guardrails.marge_brute_max) {
+          console.warn(`[guardrail] Marge brute ${yk} = ${mbPct.toFixed(1)}% hors bornes secteur [${guardrails.marge_brute_min}-${guardrails.marge_brute_max}%]`);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[enforceFramework] Guardrails check failed (non-blocking):", e);
+  }
+
+  // If no cashflow line from Framework, derive cashflow = EBITDA × (1 - taux_IS/100)
+  if (!cfLine && data.net_profit && data.cashflow) {
+    const { is: tauxIS } = getFiscalParams(country || '');
+    for (const yk of PROJ_KEYS) {
+      const ebitda = data.ebitda[yk] || 0;
+      // cashflow ≈ EBITDA × (1 - IS%) — approximation simplifiée sans amortissements
+      data.cashflow[yk] = Math.round(ebitda * (1 - tauxIS / 100));
+    }
+  }
+
+  // Recalculate COGS = revenue - gross_profit
+  for (const yk of PROJ_KEYS) {
+    const prevCogs = data.cogs[yk] || 0;
+    data.cogs[yk] = data.revenue[yk] - data.gross_profit[yk];
+    // Guard: COGS cannot be 0 or negative — apply 10% floor (minimum realistic for any sector)
+    if (data.revenue[yk] > 0 && data.cogs[yk] <= 0) {
+      console.warn(`[enforceFramework] COGS=${data.cogs[yk]} for ${yk} — forcing to 10% of revenue`);
+      data.cogs[yk] = Math.round(data.revenue[yk] * 0.10);
+      data.gross_profit[yk] = data.revenue[yk] - data.cogs[yk];
+    }
+    data.gross_margin_pct[yk] = data.revenue[yk] > 0
+      ? (data.gross_profit[yk] / data.revenue[yk]) * 100 : 0;
+    data.ebitda_margin_pct[yk] = data.revenue[yk] > 0
+      ? (data.ebitda[yk] / data.revenue[yk]) * 100 : 0;
+
+    // H2: Also scale any COGS sub-breakdown proportionally (achats_matieres, charges_directes, etc.)
+    const cogsBreakdownKeys = ['achats_matieres', 'charges_directes', 'sous_traitance', 'matieres_consommees'];
+    if (prevCogs > 0 && data.cogs[yk] !== prevCogs) {
+      const cogsRatio = data.cogs[yk] / prevCogs;
+      for (const bk of cogsBreakdownKeys) {
+        if (data[bk] && typeof data[bk][yk] === 'number' && data[bk][yk] > 0) {
+          data[bk][yk] = Math.round(data[bk][yk] * cogsRatio);
+        }
+      }
+    }
+  }
+
+  // Adjust OPEX proportionally so that total_opex = gross_profit - ebitda
+  // Ratio bounded to [0.4–2.5×]: if out of range, derive EBITDA from actual OPEX instead
+  if (data.opex) {
+    const opexFields = ['staff_salaries', 'marketing', 'office_costs', 'travel', 'insurance', 'maintenance', 'third_parties', 'other'];
+    const { is: tauxIS } = getFiscalParams(country || '');
+    for (const yk of PROJ_KEYS) {
+      const targetOpex = data.gross_profit[yk] - data.ebitda[yk];
+      const currentOpex = opexFields.reduce((sum, f) => sum + (data.opex[f]?.[yk] || 0), 0);
+      if (currentOpex > 0 && targetOpex > 0) {
+        const ratio = targetOpex / currentOpex;
+        if (ratio >= 0.4 && ratio <= 2.5) {
+          // Normal adjustment: scale OPEX to match EBITDA
+          for (const f of opexFields) {
+            if (data.opex[f]) {
+              data.opex[f][yk] = Math.round(data.opex[f][yk] * ratio);
+            }
+          }
+        } else {
+          // Ratio too extreme — derive EBITDA from actual OPEX (correct cascade direction)
+          console.warn(`[enforceFramework] OPEX ratio=${ratio.toFixed(2)} for ${yk} out of bounds [0.4–2.5] — deriving EBITDA from actual OPEX`);
+          data.ebitda[yk] = Math.round(data.gross_profit[yk] - currentOpex);
+          data.ebitda_margin_pct[yk] = data.revenue[yk] > 0
+            ? (data.ebitda[yk] / data.revenue[yk]) * 100 : 0;
+          if (data.net_profit[yk] > data.ebitda[yk]) {
+            data.net_profit[yk] = data.ebitda[yk];
+          }
+          data.cashflow[yk] = Math.round(data.ebitda[yk] * (1 - tauxIS / 100));
+        }
+      }
+    }
+  }
+
+  // Force funding_need > 0 for VAN/TRI calculations
+  if (!data.funding_need || data.funding_need <= 0) {
+    const capexTotal = (data.capex || []).reduce((sum: number, c: any) => sum + toNumber(c.acquisition_value, 0), 0);
+    const fwFunding = toNumber(frameworkData?.besoin_financement?.montant_total || frameworkData?.funding_need, 0);
+    const inputsFunding = toNumber(inputsData?.investissements?.capex_total || inputsData?.besoins_investissement?.total, 0);
+    const proxy = data.revenue?.year2 ? Math.round(data.revenue.year2 * 0.15) : 0;
+    data.funding_need = inputsFunding || capexTotal || fwFunding || proxy;
+    if (data.funding_need > 0) {
+      console.log(`[enforceConstraints] funding_need forced to ${data.funding_need}`);
+    }
+  }
+
+  // Recalculate investment metrics deterministically
+  if (data.investment_metrics && data.cashflow) {
+    const discountRate = data.investment_metrics.discount_rate || 0.12;
+    const initialInv = data.funding_need || 0;
+
+    // NPV calculation
+    const cfValues = PROJ_KEYS.map((yk, i) => data.cashflow[yk] / Math.pow(1 + discountRate, i + 1));
+    data.investment_metrics.van = Math.round(cfValues.reduce((a: number, b: number) => a + b, 0) - initialInv);
+
+    // IRR approximation (Newton-Raphson) with safety bounds
+    let irr = 0.1;
+    for (let iter = 0; iter < 50; iter++) {
+      let npv = -initialInv;
+      let dnpv = 0;
+      for (let i = 0; i < 5; i++) {
+        const cf = data.cashflow[PROJ_KEYS[i]];
+        npv += cf / Math.pow(1 + irr, i + 1);
+        dnpv -= (i + 1) * cf / Math.pow(1 + irr, i + 2);
+      }
+      if (Math.abs(dnpv) < 1e-10) break;
+      irr = irr - npv / dnpv;
+      if (isNaN(irr) || irr < -0.99 || irr > 10) { irr = 0; break; }
+      if (Math.abs(npv) < 1000) break;
+    }
+    data.investment_metrics.tri = isNaN(irr) ? 0 : Math.round(irr * 10000) / 10000;
+
+    // CAGR Revenue — current_year to year6 = 5 years span
+    // Structure: current_year, year2, year3, year4, year5, year6 → 5 projection years
+    const revCY = data.revenue.current_year;
+    const revY6 = data.revenue.year6;
+    if (revCY > 0 && revY6 > 0 && revY6 !== revCY) {
+      data.investment_metrics.cagr_revenue = Math.round((Math.pow(revY6 / revCY, 1 / 5) - 1) * 10000) / 10000;
+    }
+
+    // CAGR EBITDA — current_year to year6 = 5 years span
+    const ebCY = data.ebitda.current_year;
+    const ebY6 = data.ebitda.year6;
+    if (ebCY > 0 && ebY6 > 0 && ebY6 !== ebCY) {
+      data.investment_metrics.cagr_ebitda = Math.round((Math.pow(ebY6 / ebCY, 1 / 5) - 1) * 10000) / 10000;
+    }
+
+    // ROI
+    if (initialInv > 0) {
+      const totalNet = PROJ_KEYS.reduce((sum, yk) => sum + (data.net_profit[yk] || 0), 0);
+      data.investment_metrics.roi = Math.round((totalNet / initialInv) * 100) / 100;
+    }
+
+    // Payback
+    if (initialInv > 0) {
+      let cumCf = 0;
+      data.investment_metrics.payback_years = 5; // default
+      for (let i = 0; i < 5; i++) {
+        cumCf += data.cashflow[PROJ_KEYS[i]];
+        if (cumCf >= initialInv) {
+          // Fractional payback: year + remaining / cf_that_year
+          const prevCum = cumCf - data.cashflow[PROJ_KEYS[i]];
+          const remaining = initialInv - prevCum;
+          const cfYear = data.cashflow[PROJ_KEYS[i]];
+          data.investment_metrics.payback_years = cfYear > 0
+            ? Math.round((i + remaining / cfYear) * 10) / 10
+            : i + 1;
+          break;
+        }
+      }
+    }
+
+    // ── Post-calculation validation guards ──
+    // Guard: CAGR too low but revenue grew significantly
+    if (data.investment_metrics.cagr_revenue < 0.01 && revY6 > revCY * 1.5) {
+      data.investment_metrics.cagr_revenue = Math.round((Math.pow(revY6 / revCY, 1 / 5) - 1) * 10000) / 10000;
+    }
+    // Guard: CAGR EBITDA — if base (current_year) is negative, recalculate from year2→year6 or set null
+    if (ebCY <= 0) {
+      const ebY2 = data.ebitda[PROJ_KEYS[0]] || 0; // year2
+      if (ebY2 > 0 && ebY6 > 0 && ebY6 !== ebY2) {
+        // CAGR over 4 years (year2 → year6)
+        data.investment_metrics.cagr_ebitda = Math.round((Math.pow(ebY6 / ebY2, 1 / 4) - 1) * 10000) / 10000;
+      } else {
+        data.investment_metrics.cagr_ebitda = null;
+      }
+    } else if (data.investment_metrics.cagr_ebitda < 0.01 && ebY6 > ebCY * 1.5) {
+      data.investment_metrics.cagr_ebitda = Math.round((Math.pow(ebY6 / ebCY, 1 / 5) - 1) * 10000) / 10000;
+    }
+    // Guard: DSCR and Multiple EBITDA are meaningless when year2 EBITDA is negative
+    const ebYear2 = data.ebitda[PROJ_KEYS[0]] || 0;
+    if (ebYear2 <= 0) {
+      data.investment_metrics.dscr = null;
+      data.investment_metrics.multiple_ebitda = null;
+    }
+    // Guard: TRI negative but VAN positive → retry Newton-Raphson with different seed
+    if (data.investment_metrics.tri <= 0 && data.investment_metrics.van > 0) {
+      let irrRetry = 0.25;
+      for (let iter = 0; iter < 100; iter++) {
+        let npvR = -initialInv;
+        let dnpvR = 0;
+        for (let i = 0; i < 5; i++) {
+          const cf = data.cashflow[PROJ_KEYS[i]];
+          npvR += cf / Math.pow(1 + irrRetry, i + 1);
+          dnpvR -= (i + 1) * cf / Math.pow(1 + irrRetry, i + 2);
+        }
+        if (Math.abs(dnpvR) < 1e-10) break;
+        irrRetry = irrRetry - npvR / dnpvR;
+        if (isNaN(irrRetry) || irrRetry < -0.99 || irrRetry > 10) { irrRetry = 0; break; }
+        if (Math.abs(npvR) < 1000) break;
+      }
+      if (irrRetry > 0 && !isNaN(irrRetry)) data.investment_metrics.tri = Math.round(irrRetry * 10000) / 10000;
+    }
+    // Guard: payback 0 but funding needed
+    if (data.investment_metrics.payback_years === 0 && initialInv > 0) {
+      data.investment_metrics.payback_years = 5;
+    }
+  }
+
+  // Update scenarios VAN/TRI with proper NPV/IRR recalculation
+  if (data.scenarios && frameworkData.scenarios?.tableau) {
+    const parseFcfa = (val: any): number => {
+      if (typeof val === 'number') return val;
+      if (typeof val !== 'string') return 0;
+      const cleaned = val.replace(/[^\d.,MmKk-]/g, '');
+      let num = parseFloat(cleaned.replace(/,/g, '.'));
+      if (isNaN(num)) return 0;
+      if (/[Mm]/i.test(val)) num *= 1_000_000;
+      if (/[Kk]/i.test(val)) num *= 1_000;
+      return Math.round(num);
+    };
+
+    const fwScenarios: Record<string, Record<string, number>> = {
+      prudent: {}, central: {}, ambitieux: {}
+    };
+    for (const row of frameworkData.scenarios.tableau) {
+      const label = (row.indicateur || row.poste || row.libelle || '').toLowerCase();
+      for (const sc of ['prudent', 'central', 'ambitieux']) {
+        if (row[sc] !== undefined) {
+          if (label.includes('ca') || label.includes('chiffre') || label.includes('revenue')) {
+            fwScenarios[sc].revenue = parseFcfa(row[sc]);
+          } else if (label.includes('ebitda')) {
+            fwScenarios[sc].ebitda = parseFcfa(row[sc]);
+          } else if (label.includes('résultat') || label.includes('resultat') || label.includes('net profit')) {
+            fwScenarios[sc].net_profit = parseFcfa(row[sc]);
+          }
+        }
+      }
+    }
+
+    const mapping: Record<string, string> = {
+      pessimiste: 'prudent', realiste: 'central', optimiste: 'ambitieux'
+    };
+
+    const discountRate = data.investment_metrics?.discount_rate || 0.12;
+    const initialInv = data.funding_need || 0;
+
+    for (const [ovoSc, fwSc] of Object.entries(mapping)) {
+      if (data.scenarios[ovoSc] && fwScenarios[fwSc]) {
+        const fw = fwScenarios[fwSc];
+        if (fw.revenue) data.scenarios[ovoSc].revenue_year5 = fw.revenue;
+        if (fw.ebitda) data.scenarios[ovoSc].ebitda_year5 = fw.ebitda;
+        if (fw.net_profit) data.scenarios[ovoSc].net_profit_year5 = fw.net_profit;
+
+        // Estimate scenario cashflows proportionally to central scenario
+        const centralRev = fwScenarios.central?.revenue || data.revenue.year6 || 1;
+        const scenarioRatio = (fw.revenue || centralRev) / centralRev;
+
+        // Build proportional cashflows for NPV/IRR calculation
+        const scenarioCFs = PROJ_KEYS.map(yk => Math.round((data.cashflow[yk] || 0) * scenarioRatio));
+
+        // Calculate scenario NPV
+        const scenarioNPV = scenarioCFs.reduce((sum, cf, i) => sum + cf / Math.pow(1 + discountRate, i + 1), 0) - initialInv;
+        data.scenarios[ovoSc].van = Math.round(scenarioNPV);
+
+        // Calculate scenario IRR (Newton-Raphson)
+        if (initialInv > 0) {
+          let irrSc = 0.1;
+          for (let iter = 0; iter < 50; iter++) {
+            let npvSc = -initialInv;
+            let dnpvSc = 0;
+            for (let i = 0; i < scenarioCFs.length; i++) {
+              npvSc += scenarioCFs[i] / Math.pow(1 + irrSc, i + 1);
+              dnpvSc -= (i + 1) * scenarioCFs[i] / Math.pow(1 + irrSc, i + 2);
+            }
+            if (Math.abs(dnpvSc) < 1e-10) break;
+            irrSc = irrSc - npvSc / dnpvSc;
+            if (isNaN(irrSc) || irrSc < -0.99 || irrSc > 10) { irrSc = 0; break; }
+            if (Math.abs(npvSc) < 1000) break;
+          }
+          data.scenarios[ovoSc].tri = isNaN(irrSc) ? 0 : Math.round(irrSc * 10000) / 10000;
+        }
+      }
+    }
+  }
+
+  return data;
+}
+
+// ===== SYNC BUSINESS PLAN FINANCIAL TABLE WITH PLAN OVO =====
+export function syncBusinessPlanWithPlanOvo(bpData: any, planOvoData: any): any {
+  if (!bpData || !planOvoData?.revenue) return bpData;
+
+  const ft = bpData.financier_tableau;
+  if (!ft) return bpData;
+
+  const fmt = (v: number) => {
+    if (!v && v !== 0) return "0 FCFA";
+    return new Intl.NumberFormat('fr-FR').format(Math.round(v)) + " FCFA";
+  };
+
+  const yearMap = [
+    { target: 'annee1', source: 'year2' },
+    { target: 'annee2', source: 'year3' },
+    { target: 'annee3', source: 'year4' },
+  ];
+
+  for (const { target, source } of yearMap) {
+    if (!ft[target]) ft[target] = {};
+    ft[target].revenu = fmt(planOvoData.revenue[source]);
+    ft[target].marge_brute = fmt(planOvoData.gross_profit[source]);
+    ft[target].benefice_net = fmt(planOvoData.net_profit[source]);
+    ft[target].tresorerie_finale = fmt(planOvoData.cashflow[source]);
+
+    // Depenses = COGS + total OPEX
+    const totalOpex = planOvoData.opex
+      ? Object.values(planOvoData.opex).reduce((sum: number, cat: any) => sum + (cat?.[source] || 0), 0)
+      : 0;
+    ft[target].depenses = fmt((planOvoData.cogs?.[source] || 0) + (totalOpex as number));
+  }
+
+  bpData.financier_tableau = ft;
+  return bpData;
+}
+
+// ===== SCREENING REPORT NORMALIZER =====
+export function normalizeScreeningReport(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+
+  const decisionBlock = d.decision && typeof d.decision === 'object' ? d.decision : null;
+
+  d.screening_score = toNumber(
+    pick(d, 'screening_score', 'score_global', 'score', 'score_screening') ?? decisionBlock?.niveau_conviction,
+    0,
+  );
+  d.score = d.screening_score;
+
+  const rawVerdict = pick(d, 'verdict', 'eligibility') || decisionBlock?.verdict || (typeof d.decision === 'string' ? d.decision : null) || 'INSUFFISANT';
+  const normalizedVerdict = typeof rawVerdict === 'string'
+    ? rawVerdict.toUpperCase().replace(/É/g, 'E').replace(/\s+/g, '_')
+    : 'INSUFFISANT';
+
+  d.verdict = normalizedVerdict === 'HORS_CIBLE' ? 'NON_ELIGIBLE' : normalizedVerdict;
+  if (!['ELIGIBLE', 'CONDITIONNEL', 'NON_ELIGIBLE', 'INSUFFISANT'].includes(d.verdict)) {
+    d.verdict = d.screening_score >= 70 ? 'ELIGIBLE' : d.screening_score >= 40 ? 'CONDITIONNEL' : 'NON_ELIGIBLE';
+  }
+
+  d.verdict_summary = pick(d, 'verdict_summary', 'summary', 'resume', 'résumé') || decisionBlock?.justification || '';
+
+  const rawScreenAnomalies = pick(d, 'anomalies', 'anomalies_detectees', 'issues', 'red_flags');
+  d.anomalies = (Array.isArray(rawScreenAnomalies) ? rawScreenAnomalies : []).map((a: any) => {
+    if (typeof a === 'string') {
+      try { const p = JSON.parse(a); if (p && typeof p === 'object') return { severity: p.severity || 'attention', category: p.category || 'general', title: p.title || '', detail: p.detail || '', source_documents: Array.isArray(p.source_documents) ? p.source_documents : [], recommendation: p.recommendation || '' }; } catch {}
+      return { severity: 'attention', category: 'general', title: a, detail: a, source_documents: [], recommendation: '' };
+    }
+    return {
+      severity: pick(a, 'severity', 'severite', 'level') || 'attention',
+      category: pick(a, 'category', 'categorie', 'type') || 'general',
+      title: pick(a, 'title', 'titre', 'label', 'name') || '',
+      detail: pick(a, 'detail', 'details', 'description', 'explication') || '',
+      source_documents: toArray(pick(a, 'source_documents', 'documents', 'sources')),
+      recommendation: pick(a, 'recommendation', 'recommandation', 'action', 'fix') || '',
+    };
+  });
+
+  const cv = pick(d, 'cross_validation', 'crossValidation', 'validation_croisee') || {};
+  d.cross_validation = {
+    ca_coherent: cv.ca_coherent ?? cv.ca_ok ?? null,
+    ca_declared: toNumber(cv.ca_declared || cv.ca_declare, null),
+    ca_from_documents: toNumber(cv.ca_from_documents || cv.ca_documents, null),
+    ca_ecart_pct: toNumber(cv.ca_ecart_pct || cv.ecart_ca_pct, null),
+    bilan_equilibre: cv.bilan_equilibre ?? cv.bilan_ok ?? null,
+    bilan_ecart: toNumber(cv.bilan_ecart, null),
+    charges_personnel_coherent: cv.charges_personnel_coherent ?? cv.personnel_ok ?? null,
+    tresorerie_coherent: cv.tresorerie_coherent ?? cv.tresorerie_ok ?? null,
+    notes: toArray(cv.notes || cv.observations),
+  };
+
+  const dq = pick(d, 'document_quality', 'qualite_documentaire', 'doc_quality') || {};
+  d.document_quality = {
+    total_documents: toNumber(dq.total_documents || dq.total, 0),
+    documents_exploitables: toNumber(dq.documents_exploitables || dq.exploitables, 0),
+    documents_illisibles: toNumber(dq.documents_illisibles || dq.illisibles, 0),
+    couverture: dq.couverture || {},
+    documents_manquants_critiques: toArray(dq.documents_manquants_critiques || dq.manquants),
+    anciennete_documents: dq.anciennete_documents || dq.anciennete || '',
+  };
+
+  const fh = pick(d, 'financial_health', 'sante_financiere', 'health') || {};
+  d.financial_health = {
+    marge_brute_pct: toNumber(fh.marge_brute_pct || fh.marge_brute, null),
+    marge_nette_pct: toNumber(fh.marge_nette_pct || fh.marge_nette, null),
+    ratio_endettement_pct: toNumber(fh.ratio_endettement_pct || fh.endettement, null),
+    ratio_liquidite: toNumber(fh.ratio_liquidite || fh.liquidite, null),
+    bfr_jours: toNumber(fh.bfr_jours || fh.bfr, null),
+    benchmark_sector: fh.benchmark_sector || fh.benchmark || '',
+    health_label: fh.health_label || fh.label || 'Non évaluable',
+  };
+
+  const pm = pick(d, 'programme_match', 'match_programme');
+  d.programme_match = pm ? {
+    programme_name: pm.programme_name || pm.name || '',
+    match_score: toNumber(pm.match_score || pm.score, 0),
+    criteres_ok: toArray(pm.criteres_ok || pm.ok),
+    criteres_ko: toArray(pm.criteres_ko || pm.ko),
+    criteres_partiels: toArray(pm.criteres_partiels || pm.partiels),
+    recommandation: pm.recommandation || pm.recommendation || '',
+  } : null;
+
+  return d;
+}
+
+// ===== RECONSTRUCTION NORMALIZER =====
+export function normalizeReconstruction(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+
+  d.score_confiance = toNumber(pick(d, 'score_confiance', 'score', 'confidence_score', 'confidence'), 0);
+  d.score = d.score_confiance;
+
+  const cr = pick(d, 'compte_resultat', 'income_statement', 'cdr') || {};
+  d.compte_resultat = {
+    chiffre_affaires: toNumber(pick(cr, 'chiffre_affaires', 'ca', 'revenue', 'chiffre_d_affaires'), 0),
+    achats_matieres: toNumber(pick(cr, 'achats_matieres', 'achats', 'cogs', 'cout_ventes'), 0),
+    charges_personnel: toNumber(pick(cr, 'charges_personnel', 'personnel', 'salaires', 'masse_salariale'), 0),
+    charges_externes: toNumber(pick(cr, 'charges_externes', 'externes', 'opex'), 0),
+    dotations_amortissements: toNumber(pick(cr, 'dotations_amortissements', 'amortissements', 'depreciation'), 0),
+    impots_taxes: toNumber(pick(cr, 'impots_taxes', 'impots', 'taxes'), 0),
+    resultat_exploitation: toNumber(pick(cr, 'resultat_exploitation', 'ebit', 'operating_income'), 0),
+    charges_financieres: toNumber(pick(cr, 'charges_financieres', 'frais_financiers', 'interest'), 0),
+    resultat_net: toNumber(pick(cr, 'resultat_net', 'net_income', 'benefice_net'), 0),
+    source: 'reconstruction',
+  };
+
+  const b = pick(d, 'bilan', 'balance_sheet') || {};
+  const ba = b.actif || b;
+  const bp = b.passif || b;
+  // Format imbriqué standardisé (même structure que normalizeInputs)
+  const actifR = {
+    immobilisations: toNumber(pick(ba, 'immobilisations', 'fixed_assets'), 0),
+    stocks: toNumber(pick(ba, 'stocks', 'inventories', 'inventory'), 0),
+    creances_clients: toNumber(pick(ba, 'creances_clients', 'creances', 'receivables'), 0),
+    tresorerie: toNumber(pick(ba, 'tresorerie_actif', 'tresorerie', 'cash'), 0),
+    total_actif: 0,
+  };
+  const passifR = {
+    capitaux_propres: toNumber(pick(bp, 'capitaux_propres', 'equity', 'fonds_propres'), 0),
+    dettes_lt: toNumber(pick(bp, 'dettes_financieres', 'dettes_lt', 'long_term_debt'), 0),
+    dettes_ct: toNumber(pick(bp, 'dettes_ct', 'dettes_court_terme', 'short_term_debt'), 0),
+    fournisseurs: toNumber(pick(bp, 'dettes_fournisseurs', 'fournisseurs', 'payables'), 0),
+    total_passif: 0,
+  };
+
+  // Recalculer les totaux depuis les sous-postes
+  const sumA = actifR.immobilisations + actifR.stocks + actifR.creances_clients + actifR.tresorerie;
+  const sumP = passifR.capitaux_propres + passifR.dettes_lt + passifR.dettes_ct + passifR.fournisseurs;
+  const aiTA = toNumber(pick(ba, 'total_actif', 'total_assets', 'actif_total'), 0);
+  const aiTP = toNumber(pick(bp, 'total_passif', 'total_liabilities', 'passif_total'), 0);
+
+  actifR.total_actif = sumA > 0 ? sumA : aiTA;
+  passifR.total_passif = sumP > 0 ? sumP : aiTP;
+
+  // Équilibrage via capitaux_propres
+  if (actifR.total_actif > 0 && actifR.total_actif !== passifR.total_passif) {
+    const ecart = actifR.total_actif - passifR.total_passif;
+    console.warn(`[normalizeReconstruction] Bilan déséquilibré: Actif=${actifR.total_actif}, Passif=${passifR.total_passif} (écart ${ecart}). Ajustement via capitaux_propres.`);
+    passifR.capitaux_propres += ecart;
+    passifR.total_passif = actifR.total_actif;
+  }
+
+  d.bilan = { actif: actifR, passif: passifR };
+
+  const ef = pick(d, 'effectifs', 'employees', 'staff') || {};
+  d.effectifs = {
+    total: toNumber(pick(ef, 'total', 'headcount'), 0),
+    cadres: toNumber(pick(ef, 'cadres', 'managers', 'management'), 0),
+    employes: toNumber(pick(ef, 'employes', 'employees', 'ouvriers'), 0),
+    temporaires: toNumber(pick(ef, 'temporaires', 'temp', 'contractuels'), 0),
+  };
+
+  const k = pick(d, 'kpis', 'ratios', 'indicators') || {};
+  d.kpis = {
+    marge_brute_pct: toNumber(pick(k, 'marge_brute_pct', 'marge_brute', 'gross_margin'), 0),
+    marge_nette_pct: toNumber(pick(k, 'marge_nette_pct', 'marge_nette', 'net_margin'), 0),
+    ratio_endettement_pct: toNumber(pick(k, 'ratio_endettement_pct', 'endettement', 'debt_ratio'), 0),
+    bfr_jours: toNumber(pick(k, 'bfr_jours', 'bfr', 'working_capital_days'), 0),
+    ca_par_employe: toNumber(pick(k, 'ca_par_employe', 'revenue_per_employee'), 0),
+  };
+
+  const rr = pick(d, 'reconstruction_report', 'report') || {};
+  d.reconstruction_report = {
+    source_documents: toArray(rr.source_documents || rr.documents || rr.sources),
+    hypotheses: toArray(rr.hypotheses || rr.assumptions),
+    donnees_manquantes: toArray(rr.donnees_manquantes || rr.missing_data || rr.manquantes),
+    note_analyste: rr.note_analyste || rr.analyst_note || rr.note || '',
+  };
+
+  return d;
+}
+
+// ===== PRE-SCREENING NORMALIZER =====
+export function normalizePreScreening(raw: any): any {
+  if (!raw) return raw;
+  const d = { ...raw };
+
+  d.pre_screening_score = toNumber(pick(d, 'pre_screening_score', 'score', 'screening_score', 'score_global'), 0);
+  d.score = d.pre_screening_score;
+
+  // Classification
+  d.classification = pick(d, 'classification', 'decision', 'verdict') || 'COMPLETER_DABORD';
+  const classMap: Record<string, string> = {
+    'AVANCER': 'AVANCER_DIRECTEMENT', 'GO': 'AVANCER_DIRECTEMENT', 'ELIGIBLE': 'AVANCER_DIRECTEMENT',
+    'ACCOMPAGNER': 'ACCOMPAGNER', 'CONDITIONNEL': 'ACCOMPAGNER',
+    'COMPLETER': 'COMPLETER_DABORD', 'INSUFFISANT': 'COMPLETER_DABORD',
+    'REJETER': 'REJETER', 'NON_ELIGIBLE': 'REJETER',
+  };
+  for (const [key, val] of Object.entries(classMap)) {
+    if (d.classification.toUpperCase().includes(key)) { d.classification = val; break; }
+  }
+
+  d.classification_label = pick(d, 'classification_label', 'label') || '';
+  d.classification_detail = pick(d, 'classification_detail', 'detail', 'rationale') || '';
+
+  // Resume executif
+  const re = pick(d, 'resume_executif', 'executive_summary', 'resume') || {};
+  d.resume_executif = {
+    synthese: re.synthese || re.summary || '',
+    points_forts: toArray(re.points_forts || re.forces || re.strengths),
+    points_faibles: toArray(re.points_faibles || re.faiblesses || re.weaknesses),
+    potentiel_estime: re.potentiel_estime || re.potentiel || '',
+  };
+
+  // Qualite dossier
+  const qd = pick(d, 'qualite_dossier', 'document_quality', 'quality') || {};
+  d.qualite_dossier = {
+    score_qualite: toNumber(qd.score_qualite || qd.score, 0),
+    total_documents: toNumber(qd.total_documents || qd.total, 0),
+    documents_exploitables: toNumber(qd.documents_exploitables || qd.exploitables, 0),
+    documents_illisibles: toNumber(qd.documents_illisibles || qd.illisibles, 0),
+    niveau_preuve: qd.niveau_preuve || qd.level || 'N0 Declaratif',
+    couverture: qd.couverture || {},
+    note_qualite: qd.note_qualite || qd.note || '',
+  };
+
+  // Anomalies
+  const rawPreAnomalies = pick(d, 'anomalies', 'issues', 'red_flags');
+  d.anomalies = (Array.isArray(rawPreAnomalies) ? rawPreAnomalies : []).map((a: any) => {
+    if (typeof a === 'string') {
+      try { const p = JSON.parse(a); if (p && typeof p === 'object') return { severity: p.severity || 'attention', category: p.category || 'general', title: p.title || '', detail: p.detail || '', impact_investisseur: p.impact_investisseur || p.impact || '', recommendation: p.recommendation || '', effort: p.effort || 'moyen', responsable: p.responsable || 'entrepreneur' }; } catch {}
+      return { severity: 'attention', category: 'general', title: a, detail: a, impact_investisseur: '', recommendation: '', effort: 'moyen', responsable: 'entrepreneur' };
+    }
+    return {
+      severity: pick(a, 'severity', 'severite') || 'attention',
+      category: pick(a, 'category', 'categorie') || 'general',
+      title: pick(a, 'title', 'titre') || '',
+      detail: pick(a, 'detail', 'description') || '',
+      impact_investisseur: pick(a, 'impact_investisseur', 'impact') || '',
+      recommendation: pick(a, 'recommendation', 'recommandation') || '',
+      effort: pick(a, 'effort', 'difficulty') || 'moyen',
+      responsable: pick(a, 'responsable', 'responsible') || 'entrepreneur',
+    };
+  });
+
+  // Cross-validation
+  const cv = pick(d, 'cross_validation', 'validation_croisee') || {};
+  d.cross_validation = {
+    ca_coherent: cv.ca_coherent ?? null,
+    ca_declared: toNumber(cv.ca_declared, null),
+    ca_from_documents: toNumber(cv.ca_from_documents, null),
+    ca_ecart_pct: toNumber(cv.ca_ecart_pct, null),
+    ca_detail: cv.ca_detail || '',
+    bilan_equilibre: cv.bilan_equilibre ?? null,
+    bilan_detail: cv.bilan_detail || '',
+    charges_vs_effectifs: cv.charges_vs_effectifs ?? null,
+    charges_vs_effectifs_detail: cv.charges_vs_effectifs_detail || '',
+    tresorerie_coherent: cv.tresorerie_coherent ?? null,
+    tresorerie_detail: cv.tresorerie_detail || '',
+    dates_coherentes: cv.dates_coherentes ?? null,
+    dates_detail: cv.dates_detail || '',
+  };
+
+  // Sante financiere
+  const sf = pick(d, 'sante_financiere', 'financial_health') || {};
+  d.sante_financiere = {
+    ca_estime: toNumber(sf.ca_estime, null),
+    marge_brute_pct: toNumber(sf.marge_brute_pct, null),
+    marge_nette_pct: toNumber(sf.marge_nette_pct, null),
+    ratio_endettement_pct: toNumber(sf.ratio_endettement_pct, null),
+    tresorerie_nette: toNumber(sf.tresorerie_nette, null),
+    benchmark_comparison: Array.isArray(sf.benchmark_comparison) ? sf.benchmark_comparison : [],
+    health_label: sf.health_label || 'Non evaluable',
+    health_detail: sf.health_detail || '',
+  };
+
+  // Potentiel et reconstructibilite
+  const pr = pick(d, 'potentiel_et_reconstructibilite', 'potential', 'reconstructibilite') || {};
+  d.potentiel_et_reconstructibilite = {
+    donnees_fiables: toArray(pr.donnees_fiables || pr.reliable),
+    donnees_estimables_ia: toArray(pr.donnees_estimables_ia || pr.estimable),
+    donnees_non_reconstituables: toArray(pr.donnees_non_reconstituables || pr.non_reconstituable),
+    fiabilite_pipeline_estimee: toNumber(pr.fiabilite_pipeline_estimee || pr.fiabilite, 0),
+    fiabilite_detail: pr.fiabilite_detail || pr.detail || '',
+    signaux_positifs: toArray(pr.signaux_positifs || pr.positifs),
+    signaux_negatifs: toArray(pr.signaux_negatifs || pr.negatifs),
+  };
+
+  // Profil risque
+  const risk = pick(d, 'profil_risque', 'risk_profile') || {};
+  d.profil_risque = {
+    score_risque: toNumber(risk.score_risque || risk.score, 50),
+    risques: Array.isArray(risk.risques || risk.risks) ? (risk.risques || risk.risks) : [],
+  };
+
+  // Plan action
+  const rawPlan = pick(d, 'plan_action', 'action_plan', 'actions');
+  d.plan_action = Array.isArray(rawPlan)
+    ? rawPlan.map((a: any) => ({
+        priorite: toNumber(a.priorite || a.priority, 5),
+        action: a.action || a.description || '',
+        responsable: a.responsable || 'entrepreneur',
+        delai: a.delai || a.timeline || '',
+        effort: a.effort || 'moyen',
+        impact_score: a.impact_score || a.impact || '',
+        bloquant_pipeline: a.bloquant_pipeline ?? a.blocking ?? false,
+      }))
+    : [];
+
+  // Pathway financement
+  const pf = pick(d, 'pathway_financement', 'financing') || {};
+  d.pathway_financement = {
+    type_recommande: pf.type_recommande || pf.type || '',
+    bailleurs_potentiels: toArray(pf.bailleurs_potentiels || pf.donors),
+    montant_eligible_estime: pf.montant_eligible_estime || pf.amount || '',
+    conditions_prealables: toArray(pf.conditions_prealables || pf.conditions),
+    timeline_estimee: pf.timeline_estimee || pf.timeline || '',
+  };
+
+  // Recommandation pipeline
+  const rp = pick(d, 'recommandation_pipeline', 'pipeline_recommendation') || {};
+  d.recommandation_pipeline = {
+    lancer_pipeline: rp.lancer_pipeline ?? rp.go ?? false,
+    raison: rp.raison || rp.reason || '',
+    modules_pertinents: toArray(rp.modules_pertinents || rp.relevant),
+    modules_inutiles: toArray(rp.modules_inutiles || rp.useless),
+    avertissement: rp.avertissement || rp.warning || null,
+  };
+
+  // Programme match
+  d.programme_match = pick(d, 'programme_match') || null;
+
+  // Analyse narrative (new enriched sections)
+  const an = pick(d, 'analyse_narrative') || {};
+  d.analyse_narrative = {
+    histoire_entreprise: an.histoire_entreprise || '',
+    analyse_tendance: an.analyse_tendance || {},
+    analyse_commerciale: an.analyse_commerciale || {},
+    analyse_operationnelle: an.analyse_operationnelle || {},
+    analyse_equipe: an.analyse_equipe || {},
+    analyse_legale: an.analyse_legale || {},
+    comparaison_sectorielle: an.comparaison_sectorielle || {},
+    scenarios_prospectifs: an.scenarios_prospectifs || {},
+    scoring_granulaire: an.scoring_granulaire || {},
+    timeline_evenements: Array.isArray(an.timeline_evenements) ? an.timeline_evenements : [],
+    verdict_analyste: an.verdict_analyste || {},
+  };
+
+  return d;
+}
+
+// ===== AUTO NORMALIZE BY TYPE =====
+export function normalizeByType(type: string, data: any): any {
+  const normalizers: Record<string, (d: any) => any> = {
+    bmc: normalizeBmc, bmc_analysis: normalizeBmc,
+    sic: normalizeSic, sic_analysis: normalizeSic,
+    inputs: normalizeInputs, inputs_data: normalizeInputs,
+    framework: normalizeFramework, framework_data: normalizeFramework,
+    diagnostic: normalizeDiagnostic, diagnostic_data: normalizeDiagnostic,
+    business_plan: normalizeBusinessPlan,
+    odd: normalizeOdd, odd_analysis: normalizeOdd,
+    plan_ovo: normalizePlanOvo,
+    screening_report: normalizeScreeningReport,
+    screening: normalizeScreeningReport,
+    reconstruction: normalizeReconstruction,
+    pre_screening: normalizePreScreening,
+  };
+
+  const normalizer = normalizers[type];
+  return normalizer ? normalizer(data) : data;
+}
+
+// ===== CROSS-DELIVERABLE VALIDATOR =====
+/**
+ * Validates financial coherence across ALL deliverables.
+ * Called AFTER each deliverable generation to detect inter-agent inconsistencies.
+ */
+export function validateCrossDeliverables(
+  inputsData: any,
+  frameworkData: any,
+  planOvoData: any,
+  preScreeningData: any,
+  onePagerData: any,
+): { valid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const truth = getFinancialTruth(inputsData);
+  if (!truth) return { valid: true, errors: [], warnings: ["Pas d'inputs data — validation impossible"] };
+
+  // 1. CA cohérent entre tous les livrables
+  const checkCA = (label: string, value: any) => {
+    const v = toNumber(value, 0);
+    if (v > 0 && Math.abs(v - truth.ca_n) / truth.ca_n > 0.05) {
+      errors.push(`${label} CA (${v}) dévie de >5% du CA réel (${truth.ca_n})`);
+    }
+  };
+  checkCA("Framework", frameworkData?.kpis?.ca_annee_n);
+  checkCA("Plan OVO", planOvoData?.revenue?.current_year);
+  checkCA("Pre-screening", preScreeningData?.sante_financiere?.ca_estime);
+
+  // Parse onePager CA from traction
+  if (onePagerData?.traction?.ca_y0) {
+    const opCAStr = String(onePagerData.traction.ca_y0).replace(/[^\d]/g, '');
+    const opCA = parseFloat(opCAStr);
+    if (opCA > 0 && Math.abs(opCA - truth.ca_n) / truth.ca_n > 0.10) {
+      warnings.push(`One-Pager CA (${opCA}) dévie de >10% du CA réel (${truth.ca_n})`);
+    }
+  }
+
+  // 2. Trésorerie cohérente
+  const psTreso = toNumber(preScreeningData?.sante_financiere?.tresorerie_nette, 0);
+  const fwTreso = toNumber(frameworkData?.tresorerie_bfr?.tresorerie_nette, 0);
+  if (psTreso > 0 && fwTreso > 0 && Math.abs(psTreso - fwTreso) / Math.max(psTreso, fwTreso) > 0.15) {
+    warnings.push(`Trésorerie pre-screening (${psTreso}) vs framework (${fwTreso}) — écart >15%`);
+  }
+
+  // 3. Chaîne comptable vérifiable dans le Framework
+  if (frameworkData?.projection_5ans?.lignes && Array.isArray(frameworkData.projection_5ans.lignes)) {
+    const lignes = frameworkData.projection_5ans.lignes;
+    const findLine = (...patterns: string[]) => lignes.find((l: any) => {
+      const lb = (l.poste || l.libelle || '').toLowerCase();
+      return patterns.some(p => lb.includes(p)) && !lb.includes('%');
+    });
+    const caLine = findLine('ca total', 'revenue', 'chiffre');
+    const mbLine = findLine('marge brute', 'gross');
+    const ebitdaLine = findLine('ebitda');
+    const rnLine = findLine('résultat net', 'resultat net');
+
+    for (const yr of ['an1', 'an2', 'an3', 'an4', 'an5']) {
+      const ca = toNumber(caLine?.[yr], 0);
+      const mb = toNumber(mbLine?.[yr], 0);
+      const ebitda = toNumber(ebitdaLine?.[yr], 0);
+      const rn = toNumber(rnLine?.[yr], 0);
+      if (ca > 0) {
+        if (mb > ca) errors.push(`Framework ${yr}: Marge Brute (${mb}) > CA (${ca})`);
+        if (ebitda > mb) errors.push(`Framework ${yr}: EBITDA (${ebitda}) > Marge Brute (${mb})`);
+        if (rn > ebitda) warnings.push(`Framework ${yr}: Résultat Net (${rn}) > EBITDA (${ebitda})`);
+      }
+    }
+  }
+
+  // 4. Plan OVO chaîne P&L
+  if (planOvoData?.revenue) {
+    const YEAR_KEYS = ['current_year', 'year2', 'year3', 'year4', 'year5', 'year6'];
+    for (const yk of YEAR_KEYS) {
+      const rev = toNumber(planOvoData.revenue[yk], 0);
+      const gp = toNumber(planOvoData.gross_profit?.[yk], 0);
+      const ebitda = toNumber(planOvoData.ebitda?.[yk], 0);
+      const rn = toNumber(planOvoData.net_profit?.[yk], 0);
+      if (rev > 0) {
+        if (gp > rev) errors.push(`Plan OVO ${yk}: gross_profit (${gp}) > revenue (${rev})`);
+        if (ebitda > gp) errors.push(`Plan OVO ${yk}: ebitda (${ebitda}) > gross_profit (${gp})`);
+        if (rn > ebitda) warnings.push(`Plan OVO ${yk}: net_profit (${rn}) > ebitda (${ebitda})`);
+      }
+    }
+  }
+
+  // 5. Historique cohérent entre Plan OVO et Inputs
+  if (planOvoData?.revenue?.year_minus_1 && truth.ca_n_minus_1 > 0) {
+    if (Math.abs(planOvoData.revenue.year_minus_1 - truth.ca_n_minus_1) / truth.ca_n_minus_1 > 0.10) {
+      errors.push(`Plan OVO CA N-1 (${planOvoData.revenue.year_minus_1}) ≠ historique réel (${truth.ca_n_minus_1})`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
+}
