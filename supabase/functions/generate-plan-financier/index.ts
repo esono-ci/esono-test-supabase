@@ -405,7 +405,7 @@ serve(async (req: Request) => {
 
       // 6. Excel via Railway (non-bloquant)
       try {
-        const railwayUrl = Deno.env.get("RAILWAY_URL") || "https://esono-parser-production-8f89.up.railway.app";
+        const parserUrl = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
         const parserApiKey = Deno.env.get("PARSER_API_KEY") || "esono-parser-2026-prod";
 
         const { data: templateBlob, error: tplErr } = await supabase.storage
@@ -430,7 +430,7 @@ serve(async (req: Request) => {
         const currencyIso = (finalPlan as any)?.currency || fiscal.currency_iso || "XOF";
         console.log(`[plan-financier] Sending to Python: ${Object.keys(ovoData).length} keys, ${(ovoData.products||[]).length} products, currency_iso=${currencyIso}`);
 
-        const excelResp = await fetch(`${railwayUrl}/generate-ovo-excel`, {
+        const excelResp = await fetch(`${parserUrl}/generate-ovo-excel`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${parserApiKey}` },
           body: JSON.stringify({ data: ovoData, template_base64: templateBase64, currency_iso: currencyIso }),
@@ -514,9 +514,9 @@ async function dispatchToRailwayOpus(args: {
   userPrompt: string;
   model: string;
 }): Promise<void> {
-  const railwayUrl = Deno.env.get("RAILWAY_AI_URL");
+  const parserUrl = Deno.env.get("RAILWAY_AI_URL");
   const railwayKey = Deno.env.get("RAILWAY_AI_KEY");
-  if (!railwayUrl || !railwayKey) {
+  if (!parserUrl || !railwayKey) {
     throw new Error("RAILWAY_AI_URL / RAILWAY_AI_KEY non configurés — impossible de dispatch");
   }
 
@@ -540,7 +540,7 @@ async function dispatchToRailwayOpus(args: {
   }
 
   // 2. POST /run-agent avec le job_id de la row insérée
-  const resp = await fetch(`${railwayUrl}/run-agent`, {
+  const resp = await fetch(`${parserUrl}/run-agent`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

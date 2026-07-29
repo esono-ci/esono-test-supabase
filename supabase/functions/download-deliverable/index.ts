@@ -2377,7 +2377,7 @@ serve(async (req) => {
 
     // PDF format — generate HTML then send to parser for PDF conversion
     if (format === "pdf") {
-      const parserUrl = Deno.env.get("PARSER_URL") || Deno.env.get("RAILWAY_URL");
+      const parserUrl = Deno.env.get("PARSER_URL");
       const parserApiKey = Deno.env.get("PARSER_API_KEY");
       if (!parserUrl) {
         return new Response(JSON.stringify({ error: "PARSER_URL not configured" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });

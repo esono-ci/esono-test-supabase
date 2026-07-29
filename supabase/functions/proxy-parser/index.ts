@@ -3,7 +3,7 @@
 import { corsHeaders, errorResponse, jsonResponse } from "../_shared/helpers_v5.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const PARSER_URL = Deno.env.get("PARSER_URL") || Deno.env.get("RAILWAY_URL") || "";
+const PARSER_URL = Deno.env.get("PARSER_URL") || "";
 const PARSER_API_KEY = Deno.env.get("PARSER_API_KEY") || "";
 
 // Max file size: 200 MB

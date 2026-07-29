@@ -38,7 +38,7 @@ Réponds UNIQUEMENT en JSON valide selon ce schéma :
   }
 }`;
 
-const RAILWAY_URL = "https://esono-parser-production-8f89.up.railway.app";
+const PARSER_URL = "https://esono-parser-production-8f89.up.railway.app";
 const RAILWAY_KEY = "esono-parser-2026-prod";
 
 async function parseViaRailway(fileBase64: string, fileName: string): Promise<string> {
@@ -54,7 +54,7 @@ async function parseViaRailway(fileBase64: string, fileName: string): Promise<st
   const formData = new FormData();
   formData.append("file", blob, fileName);
 
-  const resp = await fetch(`${RAILWAY_URL}/parse`, {
+  const resp = await fetch(`${PARSER_URL}/parse`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${RAILWAY_KEY}`,

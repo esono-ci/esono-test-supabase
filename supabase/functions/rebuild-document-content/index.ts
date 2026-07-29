@@ -136,7 +136,7 @@ serve(async (req) => {
     let reparsedCount = 0;
     const reparseFailed: string[] = [];
     if (missingContentFiles.length > 0) {
-      const RAILWAY_URL = Deno.env.get("RAILWAY_URL") || "https://esono-parser-production-8f89.up.railway.app";
+      const PARSER_URL = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
       const PARSER_API_KEY = Deno.env.get("PARSER_API_KEY") || "";
       for (const storageName of missingContentFiles) {
         const cleanName = stripLegacy(storageName as string);
@@ -147,7 +147,7 @@ serve(async (req) => {
           if (!fileData) { reparseFailed.push(cleanName); continue; }
           const fd = new FormData();
           fd.append("file", fileData, cleanName);
-          const resp = await fetch(`${RAILWAY_URL}/parse`, {
+          const resp = await fetch(`${PARSER_URL}/parse`, {
             method: "POST",
             headers: { "Authorization": `Bearer ${PARSER_API_KEY}` },
             body: fd,

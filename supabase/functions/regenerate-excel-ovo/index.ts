@@ -49,10 +49,10 @@ serve(async (req) => {
     console.log(`[regenerate-excel-ovo] Sending to Railway: ${Object.keys(ovoData).length} keys, ${(ovoData.products || []).length} products, currency_iso=${currencyIso}`);
 
     // 4. Call Railway
-    const railwayUrl = Deno.env.get("RAILWAY_URL") || "https://esono-parser-production-8f89.up.railway.app";
+    const parserUrl = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
     const parserApiKey = Deno.env.get("PARSER_API_KEY") || "esono-parser-2026-prod";
 
-    const excelResp = await fetch(`${railwayUrl}/generate-ovo-excel`, {
+    const excelResp = await fetch(`${parserUrl}/generate-ovo-excel`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
