@@ -47,7 +47,7 @@ async function parseViaRailway(fileBase64: string, fileName: string): Promise<st
     method: "POST",
     headers: { "Authorization": `Bearer ${RAILWAY_KEY}` },
     body: formData,
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(300_000),
   });
 
   if (!resp.ok) {

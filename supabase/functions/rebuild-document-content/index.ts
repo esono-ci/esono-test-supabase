@@ -151,7 +151,7 @@ serve(async (req) => {
             method: "POST",
             headers: { "Authorization": `Bearer ${PARSER_API_KEY}` },
             body: fd,
-            signal: AbortSignal.timeout(25_000),
+            signal: AbortSignal.timeout(300_000),
           });
           if (!resp.ok) { console.warn(`[rebuild] parse échoué ${cleanName}: ${resp.status}`); reparseFailed.push(cleanName); continue; }
           const parsed = await resp.json();

@@ -281,7 +281,7 @@ async function createEnterpriseFromCandidature(
             method: "POST",
             headers: { "Authorization": `Bearer ${PARSER_API_KEY}` },
             body: formData,
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.timeout(300_000),
           });
           if (parseResp.ok) {
             const parsed = await parseResp.json();
