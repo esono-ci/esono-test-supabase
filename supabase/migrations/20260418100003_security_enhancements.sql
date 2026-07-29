@@ -34,9 +34,4 @@ END $$;
 -- Create index for security monitoring queries
 CREATE INDEX IF NOT EXISTS idx_activity_log_actor_created ON public.activity_log (actor_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_log_action_created ON public.activity_log (action, created_at DESC);
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'ai_cost_log') THEN
-    CREATE INDEX IF NOT EXISTS idx_ai_cost_log_created ON public.ai_cost_log (created_at DESC);
-  END IF;
-END $$;
+CREATE INDEX IF NOT EXISTS idx_ai_cost_log_created ON public.ai_cost_log (created_at DESC);
