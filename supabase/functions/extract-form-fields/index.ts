@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse, errorResponse } from "../_shared/helpers_v5.ts";
 
-const PARSER_URL = "https://esono-parser-production-8f89.up.railway.app";
+const PARSER_URL = Deno.env.get("PARSER_URL") || "";
 const RAILWAY_KEY = "esono-parser-2026-prod";
 
 const SYSTEM_PROMPT = `Tu es un expert en extraction de formulaires. À partir du texte d'un document (formulaire de candidature, fiche d'inscription, appel à projets), extrais TOUS les champs que les candidats doivent remplir.

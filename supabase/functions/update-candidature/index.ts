@@ -221,7 +221,7 @@ async function createEnterpriseFromCandidature(
   let skippedCount = 0;
   const failedDocs: string[] = [];
   if (docs.length > 0) {
-    const PARSER_URL = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
+    const PARSER_URL = Deno.env.get("PARSER_URL") || "";
     const PARSER_API_KEY = Deno.env.get("PARSER_API_KEY") || "";
     const parsedContents: string[] = [];
     // Fichiers parsés en format structuré (pour fusion avec l'existant, voir plus bas).

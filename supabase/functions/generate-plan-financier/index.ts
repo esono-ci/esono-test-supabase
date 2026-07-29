@@ -405,7 +405,7 @@ serve(async (req: Request) => {
 
       // 6. Excel via Railway (non-bloquant)
       try {
-        const parserUrl = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
+        const parserUrl = Deno.env.get("PARSER_URL") || "";
         const parserApiKey = Deno.env.get("PARSER_API_KEY") || "esono-parser-2026-prod";
 
         const { data: templateBlob, error: tplErr } = await supabase.storage

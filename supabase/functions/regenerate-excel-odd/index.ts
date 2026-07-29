@@ -42,7 +42,7 @@ serve(async (req) => {
     const templateBase64 = btoa(binaryStr);
 
     // 3. Call Railway
-    const parserUrl = Deno.env.get("PARSER_URL") || "https://esono-parser-production-8f89.up.railway.app";
+    const parserUrl = Deno.env.get("PARSER_URL") || "";
     const parserApiKey = Deno.env.get("PARSER_API_KEY") || "esono-parser-2026-prod";
 
     console.log(`[regenerate-excel-odd] Sending ${(oddData as any).evaluation_cibles_odd?.cibles?.length || 0} cibles to Railway`);

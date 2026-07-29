@@ -38,7 +38,7 @@ Réponds UNIQUEMENT en JSON valide selon ce schéma :
   }
 }`;
 
-const PARSER_URL = "https://esono-parser-production-8f89.up.railway.app";
+const PARSER_URL = Deno.env.get("PARSER_URL") || "";
 const RAILWAY_KEY = "esono-parser-2026-prod";
 
 async function parseViaRailway(fileBase64: string, fileName: string): Promise<string> {
