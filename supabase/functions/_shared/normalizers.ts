@@ -61,9 +61,10 @@ export function getFinancialTruth(inputsData: any): {
   const tresorerie = toNumber(actif.tresorerie, 0);
   const tresorerie_nette = tresorerie - toNumber(passif.tresorerie_passif, 0);
 
-  const dettes_financieres = toNumber(passif.dettes_financieres || passif.emprunts, 0);
+  const dettes_financieres = toNumber(passif.dettes_financieres || passif.emprunts, 0) || (toNumber(passif.dettes_lt, 0) + toNumber(passif.dettes_ct, 0));
   const capitaux_propres = toNumber(passif.capitaux_propres, 0);
-  const total_actif = toNumber(actif.total_actif, 0) || (toNumber(actif.immobilisations, 0) + toNumber(actif.actif_circulant, 0) + tresorerie);
+  const actif_circulant = toNumber(actif.actif_circulant, 0) || (toNumber(actif.stocks, 0) + toNumber(actif.creances_clients, 0));
+  const total_actif = toNumber(actif.total_actif, 0) || (toNumber(actif.immobilisations, 0) + actif_circulant + tresorerie);
 
   // Année courante = année des données les plus récentes
   const detectedYear = Math.max(
